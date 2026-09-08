@@ -148,17 +148,33 @@ body.lavish {
   gap: 8px;
   white-space: nowrap;
   flex-shrink: 0;
-  /* The mark is also the way back to every other review, so it has to read as a control without
-     turning the top bar into a link-coloured banner. */
-  padding: 2px 6px;
-  margin: -2px -6px;
+}
+/* A wordmark that happens to be clickable is not a control anyone finds. The way back to the
+   other reviews is a labelled button sitting next to it. */
+.bar-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 14px;
+  padding: 5px 10px;
+  border: var(--hairline-subtle);
   border-radius: var(--radius-md);
-  color: inherit;
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: var(--text-sm);
+  font-weight: var(--w-medium);
+  white-space: nowrap;
   text-decoration: none;
 }
-.brand:hover,
-.brand:focus-visible {
+.bar-link:hover,
+.bar-link:focus-visible {
+  border-color: var(--border-strong);
+  color: var(--fg);
   background: var(--bg-elevated);
+}
+.bar-link svg {
+  flex: 0 0 auto;
 }
 .brand-mark {
   font-family: var(--font-serif);
@@ -1534,6 +1550,13 @@ body.layout-gate-active iframe#artifact {
   .frame {
     padding: 0 env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
     background: var(--bg-bar);
+  }
+  .bar-link span {
+    display: none;
+  }
+  .bar-link {
+    margin-left: 8px;
+    padding: 5px 7px;
   }
   /* The sheet has its own dock, chevron and drag handle; a width drag and a hide control
      that removes the only way back to the conversation have no meaning here. */
