@@ -148,6 +148,17 @@ body.lavish {
   gap: 8px;
   white-space: nowrap;
   flex-shrink: 0;
+  /* The mark is also the way back to every other review, so it has to read as a control without
+     turning the top bar into a link-coloured banner. */
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border-radius: var(--radius-md);
+  color: inherit;
+  text-decoration: none;
+}
+.brand:hover,
+.brand:focus-visible {
+  background: var(--bg-elevated);
 }
 .brand-mark {
   font-family: var(--font-serif);
