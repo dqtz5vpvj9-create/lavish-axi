@@ -3147,6 +3147,7 @@ window.addEventListener("message", (event) => {
       messageToken,
     ).catch(() => {});
   }
+  if (msg.type === "lavish:storageWrite") saveArtifactStorage(msg.entries);
   if (msg.type === "lavish:uploadAttachment") uploadAttachment(msg);
   // There is deliberately no attachment-delete message. See removeAttachment's
   // removal note below: the iframe cannot be trusted to decide a delete, and the
@@ -3155,6 +3156,32 @@ window.addEventListener("message", (event) => {
   if (msg.type === "lavish:endSession") endSession();
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();
 });
+
+// The artifact keeps its own state - which item was decided, which section is open - in what it
+// believes is localStorage. Its sandbox has no origin to store under, so the shim in the artifact
+// hands the whole map here and this writes it, same-origin, to the session it belongs to. Last
+// write wins by design: the map is the artifact's complete state, not a delta.
+let artifactStorageWrite = Promise.resolve();
+function saveArtifactStorage(entries) {
+  if (!entries || typeof entries !== "object") return;
+  artifactStorageWrite = artifactStorageWrite
+    .catch(() => {})
+    .then(() =>
+      fetch("/api/" + key + "/artifact-storage", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ entries }),
+      }),
+    )
+    .then((response) => {
+      if (!response.ok) throw new Error("artifact storage write failed: " + response.status);
+    })
+    .catch((error) => {
+      // The artifact already believes the write succeeded; saying so in the console is the only
+      // honest signal available without inventing UI for someone else's page state.
+      console.warn(error);
+    });
+}
 
 // The sandboxed artifact iframe can't reach the loopback server (opaque origin),
 // so it hands captured image bytes here and the chrome performs the same-origin

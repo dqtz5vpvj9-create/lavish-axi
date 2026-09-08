@@ -52,7 +52,7 @@ import {
   splitExportWarnings,
 } from "./export-bundle.js";
 import { hostRejectedShareWrite, publishedDespiteError, publishToHtmlApp } from "./html-app.js";
-import { injectLavishSdk } from "./html-transform.js";
+import { injectLavishSdk, injectLavishStorage } from "./html-transform.js";
 import {
   bindHost,
   extraAllowedHosts,
@@ -951,6 +951,30 @@ export async function serve({
 
   // The narrow fatal path: the artifact cannot be served, or one of its own local assets failed
   // to load. There is no usable review to triage from, so this still reaches the agent directly.
+  // The artifact cannot reach this server itself - its opaque origin makes every request
+  // cross-origin with a null Origin, which the guard above refuses - so the chrome relays it,
+  // the same way it relays the artifact's image uploads.
+  app.put("/api/:key/artifact-storage", async (req, res, next) => {
+    try {
+      if (!isSameOriginRequest(req, allowedHostnames, allowAnyHostname)) {
+        res.status(403).json({ error: "cross-origin artifact storage write rejected" });
+        return;
+      }
+      const result = await store.saveArtifactStorage(req.params.key, req.body?.entries);
+      if (!result) {
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
+      if (result.rejected) {
+        res.status(413).json({ error: `artifact storage rejected: ${result.rejected}` });
+        return;
+      }
+      res.json({ status: "stored", keys: Object.keys(result.stored).length });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/api/:key/artifact-failures", async (req, res, next) => {
     try {
       const result = await store.recordArtifactFailures(req.params.key, req.body || {});
@@ -1246,7 +1270,15 @@ export async function serve({
           );
         return;
       }
-      res.type("html").send(injectLavishSdk(html, key, verified.artifact_revision, verified.artifact_load_token));
+      const storage = await store.readArtifactStorage(key);
+      res
+        .type("html")
+        .send(
+          injectLavishStorage(
+            injectLavishSdk(html, key, verified.artifact_revision, verified.artifact_load_token),
+            storage,
+          ),
+        );
     } catch (error) {
       next(error);
     }

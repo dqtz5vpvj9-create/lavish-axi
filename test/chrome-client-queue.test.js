@@ -837,6 +837,29 @@ test("chrome client falls back to the locator when a table cell has no row or co
   assert.doesNotMatch(html, /Locator/);
 });
 
+test("the chrome relays the artifact's storage writes, which the artifact cannot send itself", async () => {
+  const puts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      if (String(url).includes("/artifact-storage")) puts.push({ url, init, body: JSON.parse(init.body) });
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.sendFrameMessage({ type: "lavish:storageWrite", entries: { decisions: '{"c1":"accept"}' } });
+  await flushPromises();
+
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].url, "/api/abc/artifact-storage");
+  assert.equal(puts[0].init.method, "PUT");
+  assert.deepEqual(puts[0].body, { entries: { decisions: '{"c1":"accept"}' } });
+
+  // Anything that is not a map of state is not a write.
+  chrome.sendFrameMessage({ type: "lavish:storageWrite", entries: "not-a-map" });
+  await flushPromises();
+  assert.equal(puts.length, 1);
+});
+
 test("a sent annotation stays visible as a chat bubble once its pill is cleared", async () => {
   const chrome = await createChromeHarness({
     fetchImpl: async (url) => {

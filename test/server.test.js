@@ -3311,6 +3311,45 @@ test("/chrome-client.js serves the extracted chrome client script", async () => 
   }
 });
 
+test("artifact storage is written through the chrome and served back into the sandbox", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><head><title>Review</title></head><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+
+    const stored = await fetch(`${base}/api/${opened.key}/artifact-storage`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ entries: { decisions: '{"c1":"accept"}' } }),
+    });
+    assert.equal(stored.status, 200);
+
+    const load = await beginArtifactLoad(base, opened.key);
+    const html = await fetch(artifactLoadUrl(base, opened.key, load)).then((response) => response.text());
+    // The sandbox gives the document no origin to store under, so the state it kept last time
+    // has to arrive inline, before the page's own scripts look for it.
+    assert.match(html, /<head><script>\(function\(\)\{var seed=\{"decisions"/);
+
+    // The artifact itself cannot make this request: its origin is null, and the guard refuses it.
+    const foreign = await fetch(`${base}/api/${opened.key}/artifact-storage`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", origin: "http://evil.example" },
+      body: JSON.stringify({ entries: { decisions: "wiped" } }),
+    });
+    assert.equal(foreign.status, 403);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("a queued send returns the transcript and pushes it to other open reviews", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");

@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   ATTACHMENT_DELIVERY_GRACE_MS,
   MAX_DELIVERED_ATTACHMENTS,
+  MAX_ARTIFACT_STORAGE_ENTRIES,
   MAX_DELIVERED_PROMPT_BYTES,
   MAX_DELIVERED_PROMPTS,
   MAX_REQUEST_ATTACHMENT_REFS,
@@ -2236,6 +2237,46 @@ test("the delivered-prompt history stays bounded by count and bytes (#post-deliv
     // silently partial copy of the user's feedback is the failure this prevents.
     assert.equal(bounded.retained, 1, "the byte budget trims older entries down to the newest delivery");
     assert.equal(bounded.prompts[0].prompt, long, "and keeps it whole");
+  });
+});
+
+test("artifact storage round-trips and survives a session reopen", async () => {
+  await withStore(async ({ store, session }) => {
+    // The artifact's own review state. Lavish never reads into it - it only has to come back
+    // intact, because the sandboxed page has nowhere else to keep it.
+    assert.deepEqual(await store.readArtifactStorage(session.key), {});
+
+    const saved = await store.saveArtifactStorage(session.key, { decisions: '{"c1":"accept"}', open: "3" });
+    assert.deepEqual(saved.stored, { decisions: '{"c1":"accept"}', open: "3" });
+
+    await store.upsertSession(session.file, session.url);
+    assert.deepEqual(await store.readArtifactStorage(session.key), { decisions: '{"c1":"accept"}', open: "3" });
+
+    // The browser sends its whole map, so a key it dropped has to disappear here too.
+    await store.saveArtifactStorage(session.key, { open: "3" });
+    assert.deepEqual(await store.readArtifactStorage(session.key), { open: "3" });
+  });
+});
+
+test("an oversized artifact store is refused whole, not trimmed", async () => {
+  await withStore(async ({ store, session }) => {
+    await store.saveArtifactStorage(session.key, { keep: "safe" });
+
+    const huge = await store.saveArtifactStorage(session.key, { blob: "x".repeat(2 * 1024 * 1024) });
+    assert.equal(huge.rejected, "too large");
+
+    const many = {};
+    for (let i = 0; i < MAX_ARTIFACT_STORAGE_ENTRIES + 1; i += 1) many[`k${i}`] = "1";
+    assert.equal((await store.saveArtifactStorage(session.key, many)).rejected, "too many keys");
+
+    // A page cannot act on half its own state, so what was already stored stays as it was.
+    assert.deepEqual(await store.readArtifactStorage(session.key), { keep: "safe" });
+  });
+});
+
+test("saving artifact storage for an unknown file reports no session", async () => {
+  await withStore(async ({ store }) => {
+    assert.equal(await store.saveArtifactStorage("0123456789abcdef", { a: "1" }), null);
   });
 });
 
