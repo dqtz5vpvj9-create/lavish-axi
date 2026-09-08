@@ -7,6 +7,8 @@ import test from "node:test";
 import {
   ATTACHMENT_DELIVERY_GRACE_MS,
   MAX_DELIVERED_ATTACHMENTS,
+  MAX_DELIVERED_PROMPT_BYTES,
+  MAX_DELIVERED_PROMPTS,
   MAX_REQUEST_ATTACHMENT_REFS,
   SessionStore,
 } from "../src/session-store.js";
@@ -2097,3 +2099,156 @@ test("every image delivered in one poll survives, across accumulated batches (po
     assert.deepEqual(missing, [], `every id in the actual delivery stays referenced (${missing.length} were not)`);
   });
 });
+
+test("delivered prompts stay readable after the poll that consumed them (#post-delivery-history)", async () => {
+  await withStore(async ({ store, session }) => {
+    // Delivery is one-shot, so the poll's stdout is the only copy of the user's
+    // annotations unless the store keeps one. A consumer that loses that output -
+    // a filtered pipeline, a killed pipe, a crashed agent - has nothing to re-read.
+    await store.queuePrompts(session.key, {
+      domSnapshot: 'uid=1 h1 "Hello"',
+      prompts: [
+        { uid: "1", prompt: "Tighten the header", selector: "h1", tag: "annotation", text: "Hello" },
+        { uid: "2", prompt: "Drop this row", selector: "tr", tag: "annotation", text: "Row" },
+      ],
+    });
+
+    const delivered = feedbackResult(await store.takeFeedback(session.key));
+    assert.equal(delivered.prompts.length, 2);
+    assert.equal((await store.takeFeedback(session.key)).status, "waiting", "the queue is still consumed once");
+
+    const history = await store.listDeliveredPrompts(session.key);
+    assert.equal(history.retained, 2);
+    assert.deepEqual(
+      history.prompts.map(withoutDeliveryTimestamp),
+      delivered.prompts,
+      "history hands back exactly what the poll printed",
+    );
+    for (const entry of history.prompts) {
+      assert.ok(!Number.isNaN(Date.parse(entry.delivered_at)), "every entry carries a delivery timestamp");
+    }
+  });
+});
+
+test("reading delivered prompts never consumes or alters the session (#post-delivery-history)", async () => {
+  await withStore(async ({ store, session }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "1", prompt: "Delivered", selector: "h1", tag: "annotation", text: "Hello" }],
+    });
+    await store.takeFeedback(session.key);
+    // Feedback queued after the delivery is still pending: recovering the earlier batch
+    // must not hand it over early, and must not disturb what the review loop is doing.
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "2", prompt: "Still queued", selector: "h2", tag: "annotation", text: "World" }],
+    });
+
+    const before = JSON.parse(await readFile(store.file, "utf8"));
+    const history = await store.listDeliveredPrompts(session.key);
+    assert.deepEqual(
+      history.prompts.map((entry) => entry.prompt),
+      ["Delivered"],
+      "only already-delivered prompts are returned",
+    );
+    assert.deepEqual(JSON.parse(await readFile(store.file, "utf8")), before, "the read wrote nothing");
+
+    const pending = feedbackResult(await store.takeFeedback(session.key));
+    assert.deepEqual(
+      pending.prompts.map((prompt) => prompt.prompt),
+      ["Still queued"],
+      "the queued prompt was untouched and still delivers once",
+    );
+  });
+});
+
+test("delivered-prompt history survives reopening the artifact (#post-delivery-history)", async () => {
+  await withStore(async ({ store, session }) => {
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "1", prompt: "Delivered", selector: "h1", tag: "annotation", text: "Hello" }],
+    });
+    await store.takeFeedback(session.key);
+
+    // Reopening is a routine part of acting on feedback, so it must not delete the
+    // only remaining copy of that feedback.
+    await store.upsertSession(session.file, "http://localhost:4387/session/test");
+    const history = await store.listDeliveredPrompts(session.key);
+    assert.equal(history.retained, 1);
+    assert.equal(history.prompts[0].prompt, "Delivered");
+  });
+});
+
+test("delivered-prompt history filters by limit and delivery time (#post-delivery-history)", async () => {
+  await withStore(async ({ store, session }) => {
+    for (let i = 1; i <= 3; i += 1) {
+      await store.queuePrompts(session.key, {
+        prompts: [{ uid: String(i), prompt: `round ${i}`, selector: "h1", tag: "annotation", text: "" }],
+      });
+      await store.takeFeedback(session.key);
+    }
+
+    const all = await store.listDeliveredPrompts(session.key);
+    assert.deepEqual(
+      all.prompts.map((entry) => entry.prompt),
+      ["round 1", "round 2", "round 3"],
+      "history reads oldest first",
+    );
+
+    // A limit keeps the NEWEST entries: asking for fewer means the latest round.
+    const limited = await store.listDeliveredPrompts(session.key, { limit: 2 });
+    assert.deepEqual(
+      limited.prompts.map((entry) => entry.prompt),
+      ["round 2", "round 3"],
+    );
+    assert.equal(limited.retained, 3, "the retained count reports everything the filter matched");
+
+    const sinceLast = await store.listDeliveredPrompts(session.key, {
+      sinceMs: Date.parse(all.prompts.at(-1).delivered_at),
+    });
+    assert.ok(
+      sinceLast.prompts.every((entry) => Date.parse(entry.delivered_at) >= Date.parse(all.prompts.at(-1).delivered_at)),
+      "a since filter drops everything delivered earlier",
+    );
+    assert.equal((await store.listDeliveredPrompts(session.key, { sinceMs: Date.now() + 60_000 })).retained, 0);
+  });
+});
+
+test("the delivered-prompt history stays bounded by count and bytes (#post-delivery-history)", async () => {
+  await withStore(async ({ store, session }) => {
+    // Retention lives in state.json, rewritten wholesale on every store operation, so
+    // it must never grow without bound. Prompt text is user-written and unbounded on
+    // its own, which is why a count cap alone is not enough.
+    for (let i = 0; i < MAX_DELIVERED_PROMPTS + 40; i += 1) {
+      await store.queuePrompts(session.key, {
+        prompts: [{ uid: String(i), prompt: `p${i}`, selector: "h1", tag: "annotation", text: "" }],
+      });
+      await store.takeFeedback(session.key);
+    }
+    const counted = await store.listDeliveredPrompts(session.key);
+    assert.equal(counted.retained, MAX_DELIVERED_PROMPTS, "the count cap trims the oldest entries");
+    assert.equal(counted.prompts.at(-1).prompt, `p${MAX_DELIVERED_PROMPTS + 39}`, "the newest delivery is kept");
+
+    const long = "x".repeat(MAX_DELIVERED_PROMPT_BYTES);
+    await store.queuePrompts(session.key, {
+      prompts: [{ uid: "long", prompt: long, selector: "h1", tag: "annotation", text: "" }],
+    });
+    await store.takeFeedback(session.key);
+    const bounded = await store.listDeliveredPrompts(session.key);
+    // The newest delivery is never trimmed away, however large: handing back a
+    // silently partial copy of the user's feedback is the failure this prevents.
+    assert.equal(bounded.retained, 1, "the byte budget trims older entries down to the newest delivery");
+    assert.equal(bounded.prompts[0].prompt, long, "and keeps it whole");
+  });
+});
+
+test("listing delivered prompts for an unknown file reports no session (#post-delivery-history)", async () => {
+  await withStore(async ({ store }) => {
+    assert.equal(await store.listDeliveredPrompts("0123456789abcdef"), null);
+  });
+});
+
+// Compares a history entry against the prompt a poll printed: identical but for the
+// delivery timestamp the store stamps on.
+function withoutDeliveryTimestamp(entry) {
+  const prompt = { ...entry };
+  delete prompt.delivered_at;
+  return prompt;
+}
