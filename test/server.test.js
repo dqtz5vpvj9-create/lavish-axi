@@ -3311,6 +3311,41 @@ test("/chrome-client.js serves the extracted chrome client script", async () => 
   }
 });
 
+test("a new build changes the chrome's asset URLs so a reload cannot serve the old client", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><head><title>Review</title></head><body></body></html>");
+  const server = await serve({
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    build: "111-222",
+  });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+
+    const page = await fetch(`${base}/session/${opened.key}`);
+    const html = await page.text();
+    // Without this a browser may reuse the previous build's client from cache and the reload the
+    // page just performed to get onto the new build achieves nothing.
+    assert.match(html, /href="\/chrome\.css\?v=9\.9\.9-test%2B111-222"/);
+    assert.match(html, /src="\/chrome-client\.js\?v=9\.9\.9-test%2B111-222"/);
+    assert.equal(page.headers.get("cache-control"), "no-cache");
+
+    // The routes serve the same files whatever the query says.
+    assert.equal((await fetch(`${base}/chrome.css?v=9.9.9-test%2B111-222`)).status, 200);
+    assert.equal((await fetch(`${base}/chrome-client.js?v=anything`)).status, 200);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("the server's front page lists every review, and the chrome links back to it", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const project = path.join(dir, "checkout", ".lavish");
