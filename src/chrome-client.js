@@ -402,7 +402,8 @@ function render() {
       return (
         '<div class="pill-wrap"><div class="pill"><span class="pill-preview">' +
         escapeHtml(
-          prompt.prompt ||
+          prompt.summary ||
+            prompt.prompt ||
             (attachmentCount(prompt) ? (prompt.tag === "message" ? "Image message" : "Image annotation") : ""),
         ) +
         "</span>" +
@@ -574,11 +575,17 @@ async function copyText(text) {
   return true;
 }
 
+// A page that composes its own agent payload can make one prompt hundreds of lines long, and a
+// transcript of those reads as a wall of instructions the reviewer never wrote. Long entries are
+// folded to a few lines with the whole text one click away.
+const CHAT_CLAMP_CHARS = 260;
+
 function addChat(role, text, shouldScroll = true, target = "") {
   if (!text) return;
 
   const el = document.createElement("div");
   el.className = "bubble " + role;
+  const long = text.length > CHAT_CLAMP_CHARS;
   el.innerHTML =
     "<small>" +
     (role === "agent" ? "Agent" : "You") +
@@ -586,9 +593,12 @@ function addChat(role, text, shouldScroll = true, target = "") {
     // An annotation reads as a bare sentence without the thing it was about, which is
     // the difference between "make this narrower" being actionable and being a riddle.
     (target ? '<div class="bubble-target">' + escapeHtml(target) + "</div>" : "") +
-    "<div>" +
+    '<div class="bubble-body' +
+    (long ? " is-clamped" : "") +
+    '">' +
     escapeHtml(text) +
-    "</div>";
+    "</div>" +
+    (long ? '<button class="bubble-more" type="button">Show more</button>' : "");
   chatLog.appendChild(el);
   if (shouldScroll) scrollElementIntoView(el);
   return el;
@@ -3478,6 +3488,17 @@ warningsWrap.addEventListener("focusout", (event) => {
   if (warningsDrawerOpen && next && !warningsWrap.contains(next)) closeWarningsDrawer();
 });
 whiteboardCloseButton.onclick = closeWhiteboard;
+// Delegated, because the transcript is rebuilt wholesale on every sync and re-binding a listener
+// per bubble would leak one per rebuild.
+chatLog.addEventListener("click", (event) => {
+  const target = /** @type {HTMLElement | null} */ (event.target);
+  const toggle = target?.closest?.(".bubble-more");
+  if (!toggle) return;
+  const body = toggle.parentElement?.querySelector?.(".bubble-body");
+  if (!body) return;
+  const clamped = body.classList.toggle("is-clamped");
+  toggle.textContent = clamped ? "Show more" : "Show less";
+});
 panelResizer?.addEventListener?.("pointerdown", beginPanelResize);
 panelResizer?.addEventListener?.("pointermove", continuePanelResize);
 panelResizer?.addEventListener?.("pointerup", endPanelResize);

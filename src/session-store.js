@@ -68,6 +68,10 @@ export const MAX_DELIVERED_ATTACHMENTS = 256;
 // reload and usually says so in the page itself. Lavish keeps that state here instead, per
 // session, and hands it back to the artifact at load. It is the artifact's own data, opaque
 // to Lavish; the caps only stop one page from making state.json unwritable.
+// Long enough for a paragraph of review comment, short enough that it cannot become a second
+// copy of the payload it is meant to summarise.
+export const MAX_PROMPT_SUMMARY_CHARS = 2000;
+
 export const MAX_ARTIFACT_STORAGE_BYTES = 1024 * 1024;
 export const MAX_ARTIFACT_STORAGE_ENTRIES = 200;
 
@@ -811,6 +815,11 @@ function normalizePrompt(prompt) {
     tag: String(prompt.tag || ""),
     text: String(prompt.text || ""),
   };
+  // A page that composes its own agent payload - instructions, locations, quoted source, a
+  // context blob - can say here what the human actually wrote, and that is what the review's
+  // own transcript shows. The payload itself is unchanged: the agent still receives `prompt`.
+  const summary = String(prompt.summary || "").slice(0, MAX_PROMPT_SUMMARY_CHARS);
+  if (summary) normalized.summary = summary;
   const target = normalizeTarget(prompt.target);
   if (target) normalized.target = target;
   const { refs, malformed } = normalizeAttachmentRefs(prompt.attachments);
@@ -831,7 +840,10 @@ function normalizePrompt(prompt) {
 function chatEntryForPrompt(prompt) {
   const isMessage = prompt.tag === "message";
   const attachments = Array.isArray(prompt.attachments) ? prompt.attachments.length : 0;
-  const text = String(prompt.prompt || "") || (attachments ? (isMessage ? "Image message" : "Image annotation") : "");
+  const text =
+    String(prompt.summary || "") ||
+    String(prompt.prompt || "") ||
+    (attachments ? (isMessage ? "Image message" : "Image annotation") : "");
   if (!text) return null;
   const entry = { role: "user", text, at: new Date().toISOString() };
   const target = chatTargetLabel(prompt);
@@ -850,7 +862,9 @@ function chatTargetLabel(prompt) {
     const semantic = [prompt.target.rowLabel, prompt.target.columnLabel].filter(Boolean).join(" \u2192 ");
     if (semantic) return semantic;
   }
-  return String(prompt.selector || prompt.text || "");
+  // `text` is what the page calls this target - the selected text, or a label it wrote itself
+  // ("C004 · rejected · §1"). A CSS locator is what is left when nothing said it in words.
+  return String(prompt.text || prompt.selector || "");
 }
 
 // Appends one delivery to the retained history, newest last, then drops whole

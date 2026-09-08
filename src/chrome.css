@@ -1138,6 +1138,32 @@ body.panel-collapsed .panel-restore {
 .bubble.user small {
   text-align: right;
 }
+.bubble .bubble-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Folded rather than truncated: the text is all there, and the toggle below says so. */
+.bubble .bubble-body.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
+}
+.bubble .bubble-more {
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-faint);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: var(--w-bold);
+  cursor: pointer;
+}
+.bubble .bubble-more:hover {
+  color: var(--fg);
+}
 .bubble .bubble-target {
   margin-bottom: 4px;
   color: var(--fg-muted);

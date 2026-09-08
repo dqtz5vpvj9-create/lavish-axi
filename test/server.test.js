@@ -3464,7 +3464,7 @@ test("a queued send returns the transcript and pushes it to other open reviews",
     // cleared by this same response, so without it the annotation leaves no trace.
     assert.deepEqual(
       body.chat.map((entry) => [entry.role, entry.text, entry.target]),
-      [["user", "Tighten this", "h1"]],
+      [["user", "Tighten this", "Title"]],
     );
 
     const live = await nextMessage();
