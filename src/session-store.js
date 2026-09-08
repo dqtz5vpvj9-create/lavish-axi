@@ -62,6 +62,15 @@ export const MAX_DELIVERED_ATTACHMENTS = 256;
 // newest delivery - the one a lost poll is most likely trying to recover - is the
 // last thing to go, and is never cut down to fit either cap; like the attachment cap
 // above, these bound how much older history rides along, not the current delivery.
+// The artifact runs in a sandboxed iframe with an opaque origin, so `window.localStorage`
+// THROWS there rather than returning an empty store: a review page that keeps its own state -
+// which decision was made on each item, which sections are collapsed - loses it on every
+// reload and usually says so in the page itself. Lavish keeps that state here instead, per
+// session, and hands it back to the artifact at load. It is the artifact's own data, opaque
+// to Lavish; the caps only stop one page from making state.json unwritable.
+export const MAX_ARTIFACT_STORAGE_BYTES = 1024 * 1024;
+export const MAX_ARTIFACT_STORAGE_ENTRIES = 200;
+
 export const MAX_DELIVERED_PROMPTS = 200;
 export const MAX_DELIVERED_PROMPT_BYTES = 256 * 1024;
 
@@ -94,6 +103,46 @@ export class SessionStore {
     return this.runExclusive(async () => {
       const state = await this.readState();
       return state.sessions[key] || null;
+    });
+  }
+
+  /** @returns {Promise<Record<string, string>>} */
+  async readArtifactStorage(key) {
+    return this.runExclusive(async () => {
+      const state = await this.readState();
+      const stored = state.sessions[key]?.artifact_storage;
+      return stored && typeof stored === "object" ? stored : {};
+    });
+  }
+
+  /**
+   * Replaces the artifact's stored state wholesale: the browser sends the whole map it holds,
+   * so a removed key has to disappear here too. Returns what was kept, or null for an unknown
+   * session; oversized input is refused rather than trimmed, because a page cannot act on half
+   * of its own state and would be better told the write did not happen.
+   * @returns {Promise<{ stored: Record<string, string>, rejected?: string } | null>}
+   */
+  async saveArtifactStorage(key, entries) {
+    return this.lock.runExclusive(async () => {
+      const state = await this.readState();
+      const session = state.sessions[key];
+      if (!session) return null;
+      const normalized = {};
+      for (const [name, value] of Object.entries(entries && typeof entries === "object" ? entries : {})) {
+        if (typeof value !== "string") continue;
+        normalized[String(name)] = value;
+      }
+      const names = Object.keys(normalized);
+      if (names.length > MAX_ARTIFACT_STORAGE_ENTRIES) {
+        return { stored: session.artifact_storage || {}, rejected: "too many keys" };
+      }
+      if (Buffer.byteLength(JSON.stringify(normalized)) > MAX_ARTIFACT_STORAGE_BYTES) {
+        return { stored: session.artifact_storage || {}, rejected: "too large" };
+      }
+      session.artifact_storage = normalized;
+      session.updated_at = new Date().toISOString();
+      await this.writeState(state);
+      return { stored: normalized };
     });
   }
 
@@ -134,6 +183,8 @@ export class SessionStore {
       // that feedback - dropping it here would delete the history at exactly the
       // moment an agent is most likely to need it.
       delivered_prompts: Array.isArray(existing.delivered_prompts) ? existing.delivered_prompts : [],
+      artifact_storage:
+        existing.artifact_storage && typeof existing.artifact_storage === "object" ? existing.artifact_storage : {},
       dom_snapshot: existing.dom_snapshot || "",
       chat: existing.chat || [],
       updated_at: new Date().toISOString(),
