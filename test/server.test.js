@@ -1651,7 +1651,7 @@ test("Tailscale mode binds concrete listeners, serves the MagicDNS link, and tea
       headers: { accept: "text/html" },
     });
     assert.equal(landing.status, 200);
-    assert.match(landing.body, /Lavish Editor is running/);
+    assert.match(landing.body, /<title>Lavish sessions<\/title>/);
 
     const shutdown = await rawRequest(server.port, "/shutdown", {
       method: "POST",
@@ -3305,6 +3305,48 @@ test("/chrome-client.js serves the extracted chrome client script", async () => 
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") || "", /application\/javascript/);
     assert.match(body, /const sessionData/);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the server's front page lists every review, and the chrome links back to it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const project = path.join(dir, "checkout", ".lavish");
+  await mkdir(project, { recursive: true });
+  const artifact = path.join(project, "plan.html");
+  await writeFile(artifact, "<!doctype html><html><head><title>Checkout redesign</title></head><body>hi</body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+
+    const listed = await fetch(`${base}/api/sessions`).then((response) => response.json());
+    assert.deepEqual(
+      listed.sessions.map((session) => [session.key, session.title, session.project]),
+      [[opened.key, "Checkout redesign", "checkout"]],
+    );
+
+    const index = await fetch(`${base}/`).then((response) => response.text());
+    assert.match(index, /<title>Lavish sessions<\/title>/);
+
+    // An agent prints one session URL and moves on: the brand mark is the only thing on the review
+    // page that leads anywhere else, and it must not take the review's own tab with it.
+    const chrome = await fetch(`${base}/session/${opened.key}`).then((response) => response.text());
+    assert.match(chrome, /<a class="brand" href="\/" target="_blank" rel="noopener"/);
+
+    // The artifact on its own still runs sandboxed - it is the same untrusted HTML either way.
+    const source = await fetch(`${base}/artifact/${opened.key}/source.html`);
+    assert.equal(source.status, 200);
+    assert.match(source.headers.get("content-security-policy") || "", /^sandbox /);
+    const sourceHtml = await source.text();
+    assert.match(sourceHtml, /Checkout redesign/);
+    assert.doesNotMatch(sourceHtml, /sdk\.js/);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
@@ -6190,7 +6232,7 @@ test("concurrent same-session opens create only one file watcher", async () => {
   }
 });
 
-test("/health and the landing page stay responsive after opening two back-to-back sessions", async () => {
+test("/health and the session index stay responsive after opening two back-to-back sessions", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-back-to-back-"));
   const a = path.join(dir, "a.html");
   const b = path.join(dir, "b.html");
@@ -6227,7 +6269,7 @@ test("/health and the landing page stay responsive after opening two back-to-bac
       new Promise((_, reject) => setTimeout(() => reject(new Error("/ timed out")), 1000)),
     ]);
     assert.equal(rootRes.status, 200);
-    assert.match(await rootRes.text(), /Lavish Editor/);
+    assert.match(await rootRes.text(), /<title>Lavish sessions<\/title>/);
 
     assert.ok(Date.now() - start < 1000, "both probes should return well under one second");
   } finally {
