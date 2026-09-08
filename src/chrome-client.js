@@ -20,6 +20,9 @@ const retiredDraftNodes = [];
 const internalQueueKeyField = "_lavishQueueKey";
 const initialChat = Array.isArray(sessionData.initialChat) ? sessionData.initialChat : [];
 const MODE_TOGGLE_HOTKEY_KEY = String(sessionData.modeToggleHotkeyKey || "").toLowerCase();
+// The build that served this page. Anything else the server reports means this page is running
+// code that is no longer current.
+const SERVER_BUILD = String(sessionData.serverBuild || "");
 const attachmentMaxBytes = Number(sessionData.attachmentMaxBytes) || 0;
 const attachmentMaxCount = Number(sessionData.attachmentMaxCount) || 4;
 // Threaded from the server's single accepted-image list, which also drives the
@@ -1444,6 +1447,11 @@ async function submitQueuedOnce() {
   persistQueuedPrompts();
   if (Array.isArray(accepted?.chat)) syncChat(accepted.chat);
   render();
+  // The send that just landed is usually the reason an outdated page was holding back: the draft
+  // it was protecting is gone, so let it catch up now rather than at the next reload.
+  if (outdatedBanner && !outdatedBanner.hidden && !hasUnsentDraft()) {
+    convergeOnCurrentBuild(chromeOutdatedReason);
+  }
   clearSendAcknowledgementWarning();
   hideSendHint(true);
   if (queued.length) armSendAcknowledgementWarning();
@@ -2948,6 +2956,16 @@ function reloadArtifact() {
   });
 }
 
+// Eventual consistency for every page that was not the one being reopened. It keeps the banner
+// while it waits, so a page whose replacement never arrives ends up exactly where it used to, and
+// reloads itself as soon as the new server answers - unless the user is mid-sentence in an
+// annotation card, whose text is theirs to finish. That page reconverges after its next send.
+function convergeOnCurrentBuild(reason) {
+  if (chromeRestartReloadPromise) return chromeRestartReloadPromise;
+  chromeRestartReloadPromise = reloadChromeAfterServerRestart(reason, { failureCard: false });
+  return chromeRestartReloadPromise;
+}
+
 async function reloadAfterServerRestart(reason) {
   if (chromeRestartReloadPromise) return chromeRestartReloadPromise;
   chromeRestartReloadPromise = reloadChromeAfterServerRestart(reason);
@@ -2975,7 +2993,7 @@ async function probeChromeHealth() {
 // the same port. Reloading on a fixed short deadline regardless of whether anything is listening
 // trades a recoverable page for the browser's connection-error page, which no Lavish code can
 // recover from. So wait for the port to answer, and if it never does, say so instead.
-async function reloadChromeAfterServerRestart(reason = "") {
+async function reloadChromeAfterServerRestart(reason = "", { failureCard = true } = {}) {
   let sawOutage = false;
   let healthy = false;
   let settled = false;
@@ -3007,6 +3025,13 @@ async function reloadChromeAfterServerRestart(reason = "") {
 
   if (!healthy) {
     chromeRestartReloadPromise = null;
+    // A page that was only told its server is going away keeps the banner it already has. Taking
+    // the whole page over with a failure card would be a bystander announcing someone else's
+    // outage, and the banner already says the true thing with a button that re-checks.
+    if (!failureCard) {
+      setChromeOutdated(true, reason);
+      return;
+    }
     setLayoutGateFailure(
       "Lavish is not running.",
       "The Lavish server restarted and did not come back. Start it again with your agent, then check and reload this page.",
@@ -3550,7 +3575,18 @@ events.set("reload", () => {
 events.set("chrome-reload", (data) => reloadAfterServerRestart(String(data.reason || "")));
 // The replacement server serves a different artifact's review. This page keeps working against
 // it; it is only running the previous version of the chrome, which is the user's to act on.
-events.set("chrome-outdated", (data) => setChromeOutdated(true, String(data.reason || "")));
+events.set("chrome-outdated", (data) => {
+  const reason = String(data.reason || "");
+  setChromeOutdated(true, reason);
+  // A deliberate `lavish-axi stop` has nothing coming to converge on; an upgrade or a local build
+  // does, and waiting for a click to pick it up is how one review ends up several builds behind.
+  if (reason === "upgrade" || reason === "local-build") convergeOnCurrentBuild(reason);
+});
+events.set("server-build", (data) => {
+  const build = String(data.build || "");
+  if (!build || !SERVER_BUILD || build === SERVER_BUILD) return;
+  convergeOnCurrentBuild("upgrade");
+});
 events.set("agent-reply", ({ text }) => {
   addChat("agent", text);
   noteAgentReply(text);

@@ -3408,6 +3408,9 @@ test("a queued send returns the transcript and pushes it to other open reviews",
     const messages = on(socket, "message");
     const nextMessage = async () => JSON.parse(String((await messages.next()).value[0]));
     await once(socket, "open");
+    // Every connect names the build serving it, so a page that missed the announcement while it
+    // was asleep still learns it is out of date.
+    assert.deepEqual(await nextMessage(), { type: "server-build", data: { build: "9.9.9-test" } });
     assert.deepEqual(await nextMessage(), { type: "chat-sync", data: { chat: [] } });
     assert.deepEqual(await nextMessage(), { type: "agent-presence", data: { state: "waiting" } });
 
@@ -3457,6 +3460,9 @@ test("event WebSocket preserves initial state and named live-event semantics", a
     const messages = on(socket, "message");
     const nextMessage = async () => JSON.parse(String((await messages.next()).value[0]));
     await once(socket, "open");
+    // Every connect names the build serving it, so a page that missed the announcement while it
+    // was asleep still learns it is out of date.
+    assert.deepEqual(await nextMessage(), { type: "server-build", data: { build: "9.9.9-test" } });
     assert.deepEqual(await nextMessage(), { type: "chat-sync", data: { chat: [] } });
     assert.deepEqual(await nextMessage(), { type: "agent-presence", data: { state: "waiting" } });
 
