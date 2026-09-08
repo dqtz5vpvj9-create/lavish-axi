@@ -1,5 +1,14 @@
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1574,7 +1583,7 @@ function deepEqual(a, b) {
 async function serverCommand(args) {
   const port = Number(flagValue(args, "--port") || defaultPort());
   const debug = args.includes("--verbose") || process.env.LAVISH_AXI_DEBUG === "1";
-  const server = await serve({ port, stateFile: stateFile(), version: VERSION, debug });
+  const server = await serve({ port, stateFile: stateFile(), version: VERSION, build: localBuildId(), debug });
   await server.done;
   return "";
 }
@@ -1607,7 +1616,8 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   const port = defaultPort();
   const baseUrl = `http://${hostForUrl(clientHost())}:${port}`;
   const existing = await fetchHealth(baseUrl, { reconcileNetwork: true });
-  if (existing && !shouldRestartServer(VERSION, existing, forceRestart)) {
+  const buildId = localBuildId();
+  if (existing && !shouldRestartServer(VERSION, existing, forceRestart, buildId)) {
     return baseUrl;
   }
   if (existing) {
@@ -1618,7 +1628,10 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
     }
     // Stale server from an older release is squatting on the port. Ask it to shut down
     // gracefully so the upgraded client doesn't keep handing users an old chrome.
-    await requestShutdown(baseUrl, { reloadKey, reason: serverReplacementReason(VERSION, existing, forceRestart) });
+    await requestShutdown(baseUrl, {
+      reloadKey,
+      reason: serverReplacementReason(VERSION, existing, forceRestart, buildId),
+    });
     const freed = await waitForPortFree(baseUrl, 2000);
     if (!freed) {
       // Pre-handshake servers (any release older than this change) don't expose /shutdown
@@ -1635,7 +1648,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   let deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const health = await fetchHealth(baseUrl, { reconcileNetwork: true });
-    if (health && !shouldRestartServer(VERSION, health)) return baseUrl;
+    if (health && !shouldRestartServer(VERSION, health, forceRestart, buildId)) return baseUrl;
     if (health?.network_stale === true && health.app === "lavish-axi") {
       if (networkRestarted) return baseUrl;
       await requestShutdown(baseUrl, { reloadKey, reason: "" });
@@ -1656,9 +1669,28 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
 // Returns true when the running server is a different (or pre-handshake) version than
 // what this CLI was built with - i.e. the user just upgraded and the stale server needs
 // to step aside.
-export function shouldRestartServer(currentVersion, healthBody, forceRestart = false) {
+// The identity of the build this CLI would start, for a server whose version string cannot tell
+// two builds apart: a source checkout run through `npm link` reports the package version like any
+// release, so without this a rebuilt local server is never picked up. Size and mtime of the bundle
+// is enough - a rebuild always changes at least one - and it costs one stat rather than hashing
+// megabytes on every invocation.
+export function localBuildId() {
+  try {
+    const entry = fileURLToPath(new URL("../dist/cli.mjs", import.meta.url));
+    const info = statSync(entry);
+    return `${info.size}-${Math.trunc(info.mtimeMs)}`;
+  } catch {
+    return "";
+  }
+}
+
+export function shouldRestartServer(currentVersion, healthBody, forceRestart = false, currentBuild = "") {
   if (!healthBody || typeof healthBody !== "object") return false;
-  if (forceRestart && healthBody.app === "lavish-axi") return true;
+  // A source checkout replaces a same-version server only when its build actually differs.
+  // Forcing it unconditionally was fine when the only such caller was a developer's own
+  // terminal, but a linked install is the everyday CLI for every agent on the machine, and
+  // restarting the shared server on every artifact open interrupts everyone else's polls.
+  if (forceRestart && healthBody.app === "lavish-axi" && healthBody.build !== currentBuild) return true;
   if (healthBody.network_stale === true && healthBody.app === "lavish-axi") return true;
   if (typeof healthBody.version !== "string" || healthBody.version === "") return true;
   return healthBody.version !== currentVersion;
@@ -1667,8 +1699,8 @@ export function shouldRestartServer(currentVersion, healthBody, forceRestart = f
 // Which branch of `shouldRestartServer` actually fired, because that is what the other open
 // review pages are told. A local-build force replaces a server of the SAME version, so calling it
 // an upgrade would be false on both counts; only a version this CLI does not match is one.
-export function serverReplacementReason(currentVersion, healthBody, forceRestart = false) {
-  if (!shouldRestartServer(currentVersion, healthBody, forceRestart)) return "";
+export function serverReplacementReason(currentVersion, healthBody, forceRestart = false, currentBuild = "") {
+  if (!shouldRestartServer(currentVersion, healthBody, forceRestart, currentBuild)) return "";
   const runningVersion = healthBody.version;
   if (typeof runningVersion !== "string" || runningVersion === "" || runningVersion !== currentVersion) {
     return "upgrade";
@@ -1678,7 +1710,18 @@ export function serverReplacementReason(currentVersion, healthBody, forceRestart
 
 export function shouldForceRestartForLocalBuild(executablePath, sourceServerExists = localSourceServerExists()) {
   const localBuildEntry = fileURLToPath(new URL("../dist/cli.mjs", import.meta.url));
-  return sourceServerExists && path.resolve(executablePath) === path.resolve(localBuildEntry);
+  // `npm link` puts a symlink on PATH, so argv[1] is the link, not the file it points at. Compare
+  // what both paths actually resolve to or a linked checkout looks like somebody else's install.
+  return sourceServerExists && resolveRealPath(executablePath) === resolveRealPath(localBuildEntry);
+}
+
+function resolveRealPath(value) {
+  const absolute = path.resolve(String(value || ""));
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
 }
 
 function localSourceServerExists() {

@@ -2773,6 +2773,20 @@ test("local built CLI opens force a server restart while source and installed ru
   assert.equal(shouldForceRestartForLocalBuild("/usr/local/lib/node_modules/lavish-axi/dist/cli.mjs", false), false);
 });
 
+test("a linked checkout is recognised through the symlink npm put on PATH", async (t) => {
+  const { mkdtemp, symlink, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const nodePath = (await import("node:path")).default;
+  const dir = await mkdtemp(nodePath.join(tmpdir(), "lavish-link-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const link = nodePath.join(dir, "lavish-axi");
+  await symlink(fileURLToPath(new URL("../dist/cli.mjs", import.meta.url)), link);
+
+  // `npm link` is the documented way to run a checkout, and argv[1] is then the symlink. Comparing
+  // the paths as written made a linked build look like somebody else's install and never restart.
+  assert.equal(shouldForceRestartForLocalBuild(link, true), true);
+});
+
 test("shouldRestartServer reuses a server running the same version", () => {
   assert.equal(shouldRestartServer("0.1.4", { ok: true, version: "0.1.4" }), false);
 });
@@ -2786,6 +2800,19 @@ test("shouldRestartServer restarts a same-version server after a Tailscale trans
 test("shouldRestartServer restarts same-version Lavish servers when forced", () => {
   assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.4" }, true), true);
   assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "other", version: "0.1.4" }, true), false);
+});
+
+test("a local build replaces a same-version server only when the build changed", () => {
+  const running = { ok: true, app: "lavish-axi", version: "0.1.4", build: "1200-99" };
+
+  // A linked source checkout is the everyday CLI on a machine where agents share one server, so
+  // rebuilding is the only reason to interrupt everyone's polls - not every artifact open.
+  assert.equal(shouldRestartServer("0.1.4", running, true, "1200-99"), false);
+  assert.equal(shouldRestartServer("0.1.4", running, true, "1300-101"), true);
+  assert.equal(serverReplacementReason("0.1.4", running, true, "1300-101"), "local-build");
+
+  // A server old enough not to report a build at all cannot be compared, so it is replaced once.
+  assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.4" }, true, "1200-99"), true);
 });
 
 test("shouldRestartServer restarts when the running server reports a different version", () => {
