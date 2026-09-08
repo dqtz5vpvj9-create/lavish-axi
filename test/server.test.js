@@ -3370,10 +3370,12 @@ test("the server's front page lists every review, and the chrome links back to i
     const index = await fetch(`${base}/`).then((response) => response.text());
     assert.match(index, /<title>Lavish sessions<\/title>/);
 
-    // An agent prints one session URL and moves on: the brand mark is the only thing on the review
-    // page that leads anywhere else, and it must not take the review's own tab with it.
+    // An agent prints one session URL and moves on, so a review needs a visible way back to the
+    // others - a wordmark that happens to be clickable is not one - and it must not take the
+    // review's own tab with it.
     const chrome = await fetch(`${base}/session/${opened.key}`).then((response) => response.text());
-    assert.match(chrome, /<a class="brand" href="\/" target="_blank" rel="noopener"/);
+    assert.match(chrome, /<a class="bar-link" id="sessionsLink" href="\/" target="_blank" rel="noopener"/);
+    assert.match(chrome, /<span>All sessions<\/span>/);
 
     // The artifact on its own still runs sandboxed - it is the same untrusted HTML either way.
     const source = await fetch(`${base}/artifact/${opened.key}/source.html`);
