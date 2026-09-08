@@ -383,6 +383,10 @@ export async function serve({
       cleanup();
       return;
     }
+    // Sent on every connect, including a reconnect: a page that was asleep or offline while this
+    // server replaced an older one never saw the announcement, and would otherwise sit on the old
+    // build until someone reloaded it by hand.
+    client.sendEvent("server-build", { build: chromeBuildId });
     client.sendEvent("chat-sync", { chat: session?.chat || [] });
     client.sendEvent("agent-presence", { state: computePresence(key, activePolls, deliveredFeedback) });
     // A connection that attaches after the live end event still needs the terminal snapshot.
@@ -641,6 +645,10 @@ export async function serve({
       next(error);
     }
   });
+
+  // What a review page compares itself against. Version alone cannot tell two builds of a linked
+  // checkout apart, and build alone is empty for an installed release, so it is both or neither.
+  const chromeBuildId = build ? `${version}+${build}` : version;
 
   app.get("/health", async (req, res) => {
     if (!serverReady) {
@@ -1220,6 +1228,7 @@ export async function serve({
           chromeLoadToken: chromeLoad.chrome_load_token,
           attachmentMaxBytes: attachmentConfig.maxBytes,
           attachmentMaxCount: attachmentConfig.maxPerPrompt,
+          serverBuild: chromeBuildId,
         }),
       );
     } catch (error) {
@@ -2560,6 +2569,7 @@ export function createChromeHtml(
     attachmentMaxBytes = 0,
     attachmentMaxCount = 0,
     attachmentAcceptedMime = ACCEPTED_IMAGE_MIME,
+    serverBuild = "",
   } = {},
 ) {
   const acceptedMime = attachmentAcceptedMime.map(String);
@@ -2584,6 +2594,9 @@ export function createChromeHtml(
     attachmentMaxBytes,
     attachmentMaxCount,
     attachmentAcceptedMime: acceptedMime,
+    // Which build served this page, so it can tell on its own that it is out of date - the live
+    // event announcing a replacement only reaches a page that was connected when it happened.
+    serverBuild,
   });
   const { head: pathHead, tail: pathTail } = displayPathParts(session.file);
   const bodyClass = layoutGateEnabled ? "lavish layout-gate-active" : "lavish";

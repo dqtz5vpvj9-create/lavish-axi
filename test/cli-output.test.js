@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -2438,6 +2438,10 @@ function runSetupPlugin(homeDir, stateDir, pathDir) {
   );
 }
 
+// The plugin slot, the Copilot record and the Cursor directory are all named by the package, so
+// these read it rather than repeating it - a renamed package must not look like a broken setup.
+const PACKAGE_NAME = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")).name;
+
 async function writeCopilotCommandStub(pathDir, options) {
   const source = `
 const fs = require("node:fs");
@@ -2451,8 +2455,8 @@ if (command === "plugins list") {
     const records = [{ kind: "plugin", name: "lavish-axi-tools", source: "direct" }];
     if (options.installedSource && fs.existsSync(options.installedSource)) {
       records.push(options.listSourcePath
-        ? { kind: "plugin", name: "lavish-axi", sourcePath: fs.readFileSync(options.installedSource, "utf8") }
-        : { kind: "plugin", name: "lavish-axi", source: "direct" });
+        ? { kind: "plugin", name: "${PACKAGE_NAME}", sourcePath: fs.readFileSync(options.installedSource, "utf8") }
+        : { kind: "plugin", name: "${PACKAGE_NAME}", source: "direct" });
     }
     process.stdout.write(JSON.stringify(records));
   }
@@ -2467,7 +2471,7 @@ if (command === "plugin install") {
   if (options.installedSource) fs.writeFileSync(options.installedSource, pluginRoot);
   if (options.copilotConfig) {
     fs.writeFileSync(options.copilotConfig, JSON.stringify({
-      installedPlugins: [{ name: "lavish-axi", source: { source: "local", path: pluginRoot } }],
+      installedPlugins: [{ name: "${PACKAGE_NAME}", source: { source: "local", path: pluginRoot } }],
     }));
   }
   if (options.installLog) fs.appendFileSync(options.installLog, "install\\n");
@@ -2504,7 +2508,7 @@ test("setup plugin registers the installed package in the clients that are prese
     assert.match(result.stdout, /copilot,absent/);
 
     // The registered slot points at the package root, which is where plugin.json lives.
-    const linked = await realpath(`${homeDir}/.cursor/plugins/local/lavish-axi`);
+    const linked = await realpath(`${homeDir}/.cursor/plugins/local/${PACKAGE_NAME}`);
     assert.equal(linked, await realpath(fileURLToPath(new URL("..", import.meta.url))));
     assert.ok(existsSync(`${linked}/plugin.json`));
     assert.ok(existsSync(`${linked}/skills/lavish/SKILL.md`));
@@ -2620,7 +2624,7 @@ test("setup plugin repairs Copilot registration without trusting list text", asy
     await writeFile(installedSource, "/stale/lavish-axi");
     await writeFile(
       copilotConfig,
-      '{"installedPlugins":[{"name":"lavish-axi","source":{"source":"local","path":"/stale/lavish-axi"}}]}',
+      `{"installedPlugins":[{"name":"${PACKAGE_NAME}","source":{"source":"local","path":"/stale/lavish-axi"}}]}`,
     );
     const repaired = runSetupPlugin(homeDir, stateDir, pathDir);
 
@@ -2685,7 +2689,7 @@ test("setup plugin isolates a client it cannot register from the ones it can", a
   try {
     // A real directory in Cursor's slot is unregisterable - the same reported (not thrown)
     // path a Windows box without Developer Mode takes when link creation is refused.
-    const occupied = `${homeDir}/.cursor/plugins/local/lavish-axi`;
+    const occupied = `${homeDir}/.cursor/plugins/local/${PACKAGE_NAME}`;
     await mkdir(occupied, { recursive: true });
     await writeFile(`${occupied}/keep.txt`, "user content", "utf8");
     await mkdir(path.dirname(settingsFile), { recursive: true });

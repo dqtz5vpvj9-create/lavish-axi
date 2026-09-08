@@ -16,7 +16,7 @@ const servedChromeIds = new Set(
   ),
 );
 
-/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null }} HarnessSessionData */
+/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, serverBuild?: string }} HarnessSessionData */
 /** @type {HarnessSessionData} */
 const defaultSessionData = {
   key: "abc",
@@ -858,6 +858,88 @@ test("the chrome relays the artifact's storage writes, which the artifact cannot
   chrome.sendFrameMessage({ type: "lavish:storageWrite", entries: "not-a-map" });
   await flushPromises();
   assert.equal(puts.length, 1);
+});
+
+test("a page left behind by a server replacement reloads itself", async () => {
+  const chrome = await createChromeHarness({
+    artifactSrc: "/artifact/abc/index.html",
+    fakeClock: true,
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+
+  // Only the review being reopened is reloaded by the server; everyone else is told and, before
+  // this, waited for a click - which is how one review ends up several builds behind.
+  chrome.eventSource().listeners.get("chrome-outdated")({ data: JSON.stringify({ reason: "upgrade" }) });
+  assert.equal(chrome.element("outdatedBanner").hidden, false, "and says so while it waits");
+  for (let i = 0; i < 6; i += 1) {
+    await flushPromises();
+    chrome.advanceClock(1000);
+    chrome.runTimers(100);
+  }
+  await flushPromises();
+
+  assert.equal(chrome.reloadCount(), 1);
+});
+
+test("a deliberate stop leaves the page where it is", async () => {
+  const chrome = await createChromeHarness({
+    artifactSrc: "/artifact/abc/index.html",
+    fakeClock: true,
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+
+  // Nothing is coming to converge on, so reloading would only replace a readable banner with the
+  // browser's own error page.
+  chrome.eventSource().listeners.get("chrome-outdated")({ data: JSON.stringify({ reason: "stop" }) });
+  for (let i = 0; i < 6; i += 1) {
+    await flushPromises();
+    chrome.advanceClock(1000);
+    chrome.runTimers(100);
+  }
+  await flushPromises();
+
+  assert.equal(chrome.reloadCount(), 0);
+  assert.equal(chrome.element("outdatedBanner").hidden, false);
+});
+
+test("a connect that reports a different build converges too", async () => {
+  const chrome = await createChromeHarness({
+    artifactSrc: "/artifact/abc/index.html",
+    fakeClock: true,
+    sessionData: { ...defaultSessionData, serverBuild: "9.9.9+first" },
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+
+  // The page slept through the replacement and was never told. The connect frame is the only
+  // thing left that can tell it.
+  chrome.eventSource().listeners.get("server-build")({ data: JSON.stringify({ build: "9.9.9+later" }) });
+  for (let i = 0; i < 6; i += 1) {
+    await flushPromises();
+    chrome.advanceClock(1000);
+    chrome.runTimers(100);
+  }
+  await flushPromises();
+
+  assert.equal(chrome.reloadCount(), 1);
+});
+
+test("a matching build is not a reason to reload", async () => {
+  const chrome = await createChromeHarness({
+    artifactSrc: "/artifact/abc/index.html",
+    fakeClock: true,
+    sessionData: { ...defaultSessionData, serverBuild: "9.9.9+same" },
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+
+  chrome.eventSource().listeners.get("server-build")({ data: JSON.stringify({ build: "9.9.9+same" }) });
+  for (let i = 0; i < 6; i += 1) {
+    await flushPromises();
+    chrome.advanceClock(1000);
+    chrome.runTimers(100);
+  }
+  await flushPromises();
+
+  assert.equal(chrome.reloadCount(), 0);
 });
 
 test("a sent annotation stays visible as a chat bubble once its pill is cleared", async () => {
