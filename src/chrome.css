@@ -1019,6 +1019,17 @@ body.lavish {
 .bubble.user small {
   text-align: right;
 }
+.bubble .bubble-target {
+  margin-bottom: 4px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.bubble.user .bubble-target {
+  text-align: right;
+}
 @keyframes spin {
   to {
     transform: rotate(360deg);

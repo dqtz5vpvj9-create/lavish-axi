@@ -3311,6 +3311,55 @@ test("/chrome-client.js serves the extracted chrome client script", async () => 
   }
 });
 
+test("a queued send returns the transcript and pushes it to other open reviews", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+    const socket = new WebSocket(`ws://127.0.0.1:${server.port}/events/${opened.key}`, { origin: base });
+    const messages = on(socket, "message");
+    const nextMessage = async () => JSON.parse(String((await messages.next()).value[0]));
+    await once(socket, "open");
+    assert.deepEqual(await nextMessage(), { type: "chat-sync", data: { chat: [] } });
+    assert.deepEqual(await nextMessage(), { type: "agent-presence", data: { state: "waiting" } });
+
+    const queued = await fetch(`${base}/api/${opened.key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({
+        prompts: [{ uid: "1", prompt: "Tighten this", selector: "h1", tag: "annotation", text: "Title" }],
+      }),
+    });
+    const body = await queued.json();
+    assert.equal(queued.status, 200);
+    // The sender rebuilds its panel from this: the pills carrying the annotation are
+    // cleared by this same response, so without it the annotation leaves no trace.
+    assert.deepEqual(
+      body.chat.map((entry) => [entry.role, entry.text, entry.target]),
+      [["user", "Tighten this", "h1"]],
+    );
+
+    const live = await nextMessage();
+    assert.equal(live.type, "chat-sync", "a second review of the same session sees it without reconnecting");
+    assert.deepEqual(
+      live.data.chat.map((entry) => entry.text),
+      ["Tighten this"],
+    );
+    await messages.return();
+    socket.close();
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("event WebSocket preserves initial state and named live-event semantics", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");

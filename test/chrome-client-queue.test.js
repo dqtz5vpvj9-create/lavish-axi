@@ -807,6 +807,37 @@ test("chrome client falls back to the locator when a table cell has no row or co
   assert.doesNotMatch(html, /Locator/);
 });
 
+test("a sent annotation stays visible as a chat bubble once its pill is cleared", async () => {
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url) => {
+      if (!String(url).endsWith("/prompts")) return { ok: true, json: async () => ({}) };
+      return {
+        ok: true,
+        json: async () => ({
+          status: "queued",
+          pending_prompts: 1,
+          chat: [{ role: "user", text: "Review the title", target: "h1", at: "2026-09-08T00:00:00.000Z" }],
+        }),
+      };
+    },
+  });
+
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Review the title", selector: "h1", tag: "annotation", text: "Title" },
+  });
+  chrome.element("send").onclick();
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 body" });
+  await flushPromises();
+
+  // Send empties the queue, so the pill that carried this annotation is gone. Before,
+  // nothing took its place and the annotation vanished from the panel entirely.
+  assert.equal(chrome.queued().length, 0);
+  const bubble = chrome.element("chatLog").lastAppendedChild;
+  assert.match(bubble.innerHTML, /Review the title/);
+  assert.match(bubble.innerHTML, /bubble-target[^>]*>h1</, "and says what it was about");
+});
+
 test("chrome client scrolls new chat bubbles into view above queued prompts", async () => {
   const chrome = await createChromeHarness();
   const panelScroll = chrome.element("panelScroll");
@@ -4090,7 +4121,7 @@ test("chrome client strips the internal queue key before posting prompts", async
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init) => {
       posts.push({ url, body: JSON.parse(init.body) });
-      return { ok: true };
+      return { ok: true, json: async () => ({}) };
     },
   });
 
@@ -4118,7 +4149,7 @@ test("chrome client sends queued prompts while the agent is working", async () =
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init) => {
       posts.push({ url, body: JSON.parse(init.body) });
-      return { ok: true };
+      return { ok: true, json: async () => ({}) };
     },
   });
 
@@ -4209,7 +4240,7 @@ test("chrome send and end carries the end intent with queued prompts", async () 
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init = {}) => {
       posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
-      return { ok: true };
+      return { ok: true, json: async () => ({}) };
     },
   });
 
@@ -4242,7 +4273,7 @@ test("chrome send and end with an empty composer nudges instead of ending", asyn
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init = {}) => {
       posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
-      return { ok: true };
+      return { ok: true, json: async () => ({}) };
     },
   });
   chrome.element("sendHint").hidden = true;
@@ -4279,7 +4310,7 @@ test("chrome send and end during an in-flight submit still ends after the submit
     fetchImpl: async (url, init = {}) => {
       posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
       if (posts.length === 1) await firstPost;
-      return { ok: true };
+      return { ok: true, json: async () => ({}) };
     },
   });
 
@@ -4737,7 +4768,7 @@ test("server restart flushes an authenticated inline whiteboard before reloading
       if (url === "/health") {
         healthChecks += 1;
         if (healthChecks === 1) throw new Error("server is restarting");
-        return { ok: true };
+        return { ok: true, json: async () => ({}) };
       }
       return whiteboardFetch(url);
     },
@@ -4772,7 +4803,7 @@ test("server restart flushes an authenticated overlay before reloading", async (
       if (url === "/health") {
         healthChecks += 1;
         if (healthChecks === 1) throw new Error("server is restarting");
-        return { ok: true };
+        return { ok: true, json: async () => ({}) };
       }
       return whiteboardFetch(url);
     },
@@ -4822,7 +4853,7 @@ test("server restart bounds the wait for a whiteboard flush", async () => {
       if (url === "/health") {
         healthChecks += 1;
         if (healthChecks === 1) throw new Error("server is restarting");
-        return { ok: true };
+        return { ok: true, json: async () => ({}) };
       }
       return whiteboardFetch(url);
     },
@@ -5179,7 +5210,7 @@ test("a queued attachment ref is projected to primitives, not kept by reference 
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init) => {
       posts.push({ url, body: JSON.parse(init.body) });
-      return { ok: true };
+      return { ok: true, json: async () => ({}) };
     },
   });
   const id = "a".repeat(64) + ".png";

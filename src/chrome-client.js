@@ -568,12 +568,21 @@ async function copyText(text) {
   return true;
 }
 
-function addChat(role, text, shouldScroll = true) {
+function addChat(role, text, shouldScroll = true, target = "") {
   if (!text) return;
 
   const el = document.createElement("div");
   el.className = "bubble " + role;
-  el.innerHTML = "<small>" + (role === "agent" ? "Agent" : "You") + "</small><div>" + escapeHtml(text) + "</div>";
+  el.innerHTML =
+    "<small>" +
+    (role === "agent" ? "Agent" : "You") +
+    "</small>" +
+    // An annotation reads as a bare sentence without the thing it was about, which is
+    // the difference between "make this narrower" being actionable and being a riddle.
+    (target ? '<div class="bubble-target">' + escapeHtml(target) + "</div>" : "") +
+    "<div>" +
+    escapeHtml(text) +
+    "</div>";
   chatLog.appendChild(el);
   if (shouldScroll) scrollElementIntoView(el);
   return el;
@@ -585,7 +594,7 @@ function syncChat(chat) {
   }
 
   let lastChatBubble = null;
-  for (const item of chat) lastChatBubble = addChat(item.role, item.text, false) || lastChatBubble;
+  for (const item of chat) lastChatBubble = addChat(item.role, item.text, false, item.target) || lastChatBubble;
   if (workingBubble) chatLog.appendChild(workingBubble);
   // Handed-back drafts were written at the end of the conversation, and a rebuild re-appends the
   // whole transcript - so without this they end up above it, where the scroll below would leave
@@ -1304,11 +1313,17 @@ async function submitQueuedOnce() {
     }
     throw new Error("failed to submit queued prompts");
   }
+  // The pills for this batch are about to be cleared, so take the transcript the server
+  // just recorded and rebuild from it: every prompt that was accepted is now a bubble,
+  // and a layout-fix prompt the server declined never becomes one. Falling back to the
+  // local queue would guess at both.
+  const accepted = await response.json().catch(() => null);
   for (const prompt of prompts) {
     const index = queued.indexOf(prompt);
     if (index !== -1) queued.splice(index, 1);
   }
   persistQueuedPrompts();
+  if (Array.isArray(accepted?.chat)) syncChat(accepted.chat);
   render();
   clearSendAcknowledgementWarning();
   hideSendHint(true);
@@ -3382,7 +3397,7 @@ render();
 setChromeOutdated(false);
 setWarningsDrawerOpen(false);
 renderWarnings();
-initialChat.forEach((item) => addChat(item.role, item.text));
+initialChat.forEach((item) => addChat(item.role, item.text, true, item.target));
 retiredDrafts.forEach((text) => renderRetiredDraft(text));
 setAgentPresence("waiting");
 // The session already ended before this page (re)loaded, so there is no future live `ended` event

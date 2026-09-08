@@ -2239,6 +2239,127 @@ test("the delivered-prompt history stays bounded by count and bytes (#post-deliv
   });
 });
 
+test("every accepted prompt becomes a chat entry, not just typed messages", async () => {
+  await withStore(async ({ store, session }) => {
+    // A send clears the queued pills, so a prompt the transcript does not record is
+    // gone from the reviewer's screen with nothing on the server to read it back from.
+    await store.queuePrompts(session.key, {
+      prompts: [
+        { uid: "1", prompt: "Tighten this heading", selector: "h1.title", tag: "annotation", text: "Choreo" },
+        { uid: "2", prompt: "Typed reply", selector: "", tag: "message", text: "Freeform message" },
+        {
+          uid: "3",
+          prompt: "This cell is wrong",
+          selector: "td:nth-child(2)",
+          tag: "annotation",
+          text: "1.4",
+          target: { type: "table-cell", rowLabel: "T3", columnLabel: "TCT" },
+        },
+        { uid: "4", prompt: "Fix these", selector: "", tag: "layout-warnings", text: "2 layout issues" },
+      ],
+    });
+
+    const stored = await store.findByKey(session.key);
+    assert.deepEqual(
+      stored.chat.map((entry) => [entry.text, entry.target || "", entry.tag || ""]),
+      [
+        ["Tighten this heading", "h1.title", "annotation"],
+        ["Typed reply", "", ""],
+        ["This cell is wrong", "T3 \u2192 TCT", "annotation"],
+        ["Fix these", "2 layout issues", "layout-warnings"],
+      ],
+      "annotations, table-cell targets and queued layout fixes are all part of the conversation",
+    );
+  });
+});
+
+test("an image-only prompt is recorded with the label its pill showed", async () => {
+  await withStore(async ({ store, session }) => {
+    // It has no text of its own, and dropping it for that reason is the same silent
+    // erasure - the reviewer attached an image and sent it.
+    const id = "b".repeat(64) + ".png";
+    const resolveAttachment = async (_key, requested) =>
+      requested === id
+        ? { id, type: "image", path: "/vetted/shot.png", mime: "image/png", bytes: 42, width: 2, height: 1 }
+        : null;
+    await store.queuePrompts(
+      session.key,
+      {
+        prompts: [
+          { uid: "1", prompt: "", selector: "figure", tag: "annotation", text: "", attachments: [{ id }] },
+          { uid: "2", prompt: "", selector: "", tag: "message", text: "", attachments: [{ id }] },
+          { uid: "3", prompt: "", selector: "", tag: "message", text: "" },
+        ],
+      },
+      { resolveAttachment, maxPerPrompt: 4, maxPromptBytes: 25 * 1024 * 1024 },
+    );
+
+    const stored = await store.findByKey(session.key);
+    assert.deepEqual(
+      stored.chat.map((entry) => entry.text),
+      ["Image annotation", "Image message"],
+      "a prompt with neither text nor an image has nothing to show and is left out",
+    );
+  });
+});
+
+test("trimming drops whole deliveries rather than cutting one in half (#post-delivery-history)", async () => {
+  await withStore(async ({ store, session }) => {
+    // The unit of recovery is a delivery: an agent re-reading a lost poll wants the
+    // round of feedback it lost, whole. A trim that keeps the newest N *entries* can
+    // hand back part of an older delivery, which reads as complete and is not.
+    const older = Array.from({ length: 5 }, (_, i) => ({
+      uid: `old${i}`,
+      prompt: `old${i}`,
+      selector: "h1",
+      tag: "annotation",
+      text: "",
+    }));
+    await store.queuePrompts(session.key, { prompts: older });
+    await store.takeFeedback(session.key);
+
+    const newer = Array.from({ length: MAX_DELIVERED_PROMPTS - 2 }, (_, i) => ({
+      uid: `new${i}`,
+      prompt: `new${i}`,
+      selector: "h1",
+      tag: "annotation",
+      text: "",
+    }));
+    await store.queuePrompts(session.key, { prompts: newer });
+    await store.takeFeedback(session.key);
+
+    const history = await store.listDeliveredPrompts(session.key);
+    // Both deliveries together exceed the count cap by 3. Entry-wise trimming would
+    // keep two of the older delivery's five prompts; group-wise trimming drops it.
+    assert.equal(history.retained, MAX_DELIVERED_PROMPTS - 2, "the older delivery is dropped whole");
+    assert.ok(
+      history.prompts.every((entry) => entry.uid.startsWith("new")),
+      "no partial remnant of the older delivery survives",
+    );
+  });
+});
+
+test("a delivery bigger than both caps is retained whole (#post-delivery-history)", async () => {
+  await withStore(async ({ store, session }) => {
+    // Pending prompts accumulate across an unbounded number of accepted requests, so
+    // one poll can legitimately deliver more than either cap allows. The caps bound
+    // how much older history rides along, never the delivery being recorded.
+    const batch = Array.from({ length: MAX_DELIVERED_PROMPTS + 5 }, (_, i) => ({
+      uid: String(i),
+      prompt: `p${i}`,
+      selector: "h1",
+      tag: "annotation",
+      text: "",
+    }));
+    await store.queuePrompts(session.key, { prompts: batch });
+    await store.takeFeedback(session.key);
+
+    const history = await store.listDeliveredPrompts(session.key);
+    assert.equal(history.retained, batch.length, "every prompt in the delivery is retained");
+    assert.equal(history.prompts.at(-1).prompt, `p${batch.length - 1}`);
+  });
+});
+
 test("listing delivered prompts for an unknown file reports no session (#post-delivery-history)", async () => {
   await withStore(async ({ store }) => {
     assert.equal(await store.listDeliveredPrompts("0123456789abcdef"), null);
