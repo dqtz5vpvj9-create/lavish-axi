@@ -942,6 +942,20 @@ test("a matching build is not a reason to reload", async () => {
   assert.equal(chrome.reloadCount(), 0);
 });
 
+test("a long transcript entry is folded, with the whole text one click away", async () => {
+  const chrome = await createChromeHarness();
+  const long = "x".repeat(400);
+
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify({ text: long }) });
+  const bubble = chrome.element("chatLog").lastAppendedChild;
+
+  // A page that composes its own agent payload can make one prompt hundreds of lines long; a
+  // transcript of those is a wall of instructions nobody wrote by hand.
+  assert.match(bubble.innerHTML, /class="bubble-body is-clamped"/);
+  assert.match(bubble.innerHTML, /Show more/);
+  assert.ok(bubble.innerHTML.includes(long), "the text itself is all there");
+});
+
 test("a sent annotation stays visible as a chat bubble once its pill is cleared", async () => {
   const chrome = await createChromeHarness({
     fetchImpl: async (url) => {

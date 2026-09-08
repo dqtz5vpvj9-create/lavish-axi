@@ -2304,13 +2304,41 @@ test("every accepted prompt becomes a chat entry, not just typed messages", asyn
     assert.deepEqual(
       stored.chat.map((entry) => [entry.text, entry.target || "", entry.tag || ""]),
       [
-        ["Tighten this heading", "h1.title", "annotation"],
+        ["Tighten this heading", "Choreo", "annotation"],
         ["Typed reply", "", ""],
         ["This cell is wrong", "T3 \u2192 TCT", "annotation"],
         ["Fix these", "2 layout issues", "layout-warnings"],
       ],
       "annotations, table-cell targets and queued layout fixes are all part of the conversation",
     );
+  });
+});
+
+test("a page that composes its own payload can say what the human wrote", async () => {
+  await withStore(async ({ store, session }) => {
+    // A review page builds one long prompt out of instructions, locations, quoted source and a
+    // context blob. All of that is for the agent; the transcript is for the person who wrote the
+    // one sentence buried inside it.
+    await store.queuePrompts(session.key, {
+      prompts: [
+        {
+          uid: "1",
+          prompt: "Please handle review item C005.\nLocation: design.tex:21\nContext data: {...}",
+          summary: "This sentence says nothing - every path is an order by definition.",
+          selector: "form#decision-C005",
+          tag: "manuscript-review",
+          text: "C005 · comment · §3",
+        },
+      ],
+    });
+
+    const stored = await store.findByKey(session.key);
+    assert.deepEqual(
+      stored.chat.map((entry) => [entry.text, entry.target]),
+      [["This sentence says nothing - every path is an order by definition.", "C005 · comment · §3"]],
+    );
+    // The agent still gets the whole payload: only what is shown changed.
+    assert.match(stored.prompts[0].prompt, /Context data/);
   });
 });
 
