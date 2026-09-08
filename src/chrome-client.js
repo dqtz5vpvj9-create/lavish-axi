@@ -113,6 +113,9 @@ const panelHead = /** @type {HTMLDivElement} */ (document.getElementById("panelH
 const panelSummary = /** @type {HTMLSpanElement} */ (document.getElementById("panelSummary"));
 const panelToggle = /** @type {HTMLButtonElement} */ (document.getElementById("panelToggle"));
 const panelScrim = /** @type {HTMLDivElement} */ (document.getElementById("panelScrim"));
+const panelResizer = /** @type {HTMLDivElement} */ (document.getElementById("panelResizer"));
+const panelCollapse = /** @type {HTMLButtonElement} */ (document.getElementById("panelCollapse"));
+const panelRestore = /** @type {HTMLButtonElement} */ (document.getElementById("panelRestore"));
 const sendButton = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
 const sendAndEndButton = /** @type {HTMLButtonElement} */ (document.getElementById("sendAndEnd"));
 const annotationSwitch = /** @type {HTMLButtonElement} */ (document.getElementById("annotation"));
@@ -748,6 +751,122 @@ async function refreshChromeLoadHandoff(requestSequence) {
 
 function scrollPanelToBottom() {
   panelScroll.scrollTop = panelScroll.scrollHeight;
+}
+
+// ---- Desktop panel width and visibility ----
+// At desktop widths the panel was a fixed 360px column with no way to widen it and no way to put
+// it away: a wide table or a long annotation had 360px to live in, and an artifact that needed the
+// whole window could not have it. Width is a preference rather than session state, so it is kept
+// in localStorage and applies to every review this browser opens.
+const PANEL_MIN_W = 280;
+// What the artifact keeps for itself no matter how wide the panel is dragged. Without a floor the
+// drag can push the thing being reviewed down to a sliver, which is never what the drag meant.
+const PANEL_FRAME_MIN_W = 360;
+const PANEL_MAX_W = 720;
+const PANEL_DEFAULT_W = 360;
+const PANEL_KEYBOARD_STEP_PX = 16;
+const panelWidthStorageKey = "lavish-axi:panel-width";
+const panelCollapsedStorageKey = "lavish-axi:panel-collapsed";
+let panelWidth = readStoredPanelWidth();
+let panelCollapsed = readStoredPanelCollapsed();
+/** @type {{ pointerId: any, startX: number, startWidth: number } | null} */
+let panelResizeDrag = null;
+
+function readStoredPanelWidth() {
+  try {
+    return clampPanelWidth(Number(localStorage.getItem(panelWidthStorageKey)));
+  } catch {
+    return PANEL_DEFAULT_W;
+  }
+}
+
+function readStoredPanelCollapsed() {
+  try {
+    return localStorage.getItem(panelCollapsedStorageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function clampPanelWidth(value) {
+  if (!Number.isFinite(value) || value <= 0) return PANEL_DEFAULT_W;
+  const room = Number(window.innerWidth) - PANEL_FRAME_MIN_W;
+  const max = Math.min(PANEL_MAX_W, Number.isFinite(room) && room > PANEL_MIN_W ? room : PANEL_MAX_W);
+  return Math.round(Math.min(Math.max(value, PANEL_MIN_W), Math.max(max, PANEL_MIN_W)));
+}
+
+// CSS owns the geometry; this only ever writes the one custom property the grid reads, so the
+// phone breakpoint keeps overriding it the way it already does.
+function applyPanelWidth() {
+  const root = document.documentElement;
+  if (!root || !root.style || typeof root.style.setProperty !== "function") return;
+  root.style.setProperty("--panel-w", panelWidth + "px");
+}
+
+function setPanelWidth(value, { persist = true } = {}) {
+  panelWidth = clampPanelWidth(value);
+  applyPanelWidth();
+  if (!persist) return;
+  try {
+    localStorage.setItem(panelWidthStorageKey, String(panelWidth));
+  } catch {
+    // Storage refused only costs the preference on the next page load, not this drag.
+  }
+}
+
+function applyPanelCollapsed() {
+  document.body.classList.toggle("panel-collapsed", panelCollapsed);
+  panelCollapse?.setAttribute?.("aria-expanded", panelCollapsed ? "false" : "true");
+}
+
+function setPanelCollapsed(collapsed) {
+  panelCollapsed = Boolean(collapsed);
+  applyPanelCollapsed();
+  try {
+    if (panelCollapsed) localStorage.setItem(panelCollapsedStorageKey, "1");
+    else localStorage.removeItem(panelCollapsedStorageKey);
+  } catch {
+    // Same trade as the width: the preference stops surviving a reload, nothing else.
+  }
+  // The control the user just pressed is about to be display:none, so move focus to the one
+  // that replaces it rather than dropping it on the document.
+  if (panelCollapsed) panelRestore?.focus?.();
+  else panelCollapse?.focus?.();
+}
+
+function togglePanelCollapsed() {
+  if (isMobileSheet()) return;
+  setPanelCollapsed(!panelCollapsed);
+}
+
+function isPanelCollapseHotkey(event) {
+  return (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.code === "Backslash";
+}
+
+function beginPanelResize(event) {
+  if (isMobileSheet()) return;
+  panelResizeDrag = {
+    pointerId: event.pointerId,
+    startX: Number(event.clientX),
+    startWidth: panelWidth,
+  };
+  document.body.classList.add("panel-resizing");
+  panelResizer?.setPointerCapture?.(event.pointerId);
+  event.preventDefault?.();
+}
+
+function continuePanelResize(event) {
+  if (!panelResizeDrag || event.pointerId !== panelResizeDrag.pointerId) return;
+  // The panel is on the right, so dragging left widens it.
+  setPanelWidth(panelResizeDrag.startWidth + (panelResizeDrag.startX - Number(event.clientX)), { persist: false });
+}
+
+function endPanelResize(event) {
+  if (!panelResizeDrag || (event && event.pointerId !== panelResizeDrag.pointerId)) return;
+  panelResizer?.releasePointerCapture?.(panelResizeDrag.pointerId);
+  panelResizeDrag = null;
+  document.body.classList.remove("panel-resizing");
+  setPanelWidth(panelWidth);
 }
 
 // ---- Phone-width conversation sheet ----
@@ -3307,6 +3426,29 @@ warningsWrap.addEventListener("focusout", (event) => {
   if (warningsDrawerOpen && next && !warningsWrap.contains(next)) closeWarningsDrawer();
 });
 whiteboardCloseButton.onclick = closeWhiteboard;
+panelResizer?.addEventListener?.("pointerdown", beginPanelResize);
+panelResizer?.addEventListener?.("pointermove", continuePanelResize);
+panelResizer?.addEventListener?.("pointerup", endPanelResize);
+panelResizer?.addEventListener?.("pointercancel", endPanelResize);
+// A double-click on a splitter putting it back where it started is the convention every
+// editor with one already taught the user.
+panelResizer?.addEventListener?.("dblclick", () => setPanelWidth(PANEL_DEFAULT_W));
+panelResizer?.addEventListener?.("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  setPanelWidth(panelWidth + (event.key === "ArrowLeft" ? PANEL_KEYBOARD_STEP_PX : -PANEL_KEYBOARD_STEP_PX));
+});
+if (panelCollapse) panelCollapse.onclick = () => setPanelCollapsed(true);
+if (panelRestore) panelRestore.onclick = () => setPanelCollapsed(false);
+window.addEventListener("resize", () => {
+  // A narrower window can leave a stored width with no room left for the artifact.
+  if (!isMobileSheet()) setPanelWidth(panelWidth, { persist: false });
+});
+document.addEventListener("keydown", (event) => {
+  if (!isPanelCollapseHotkey(event)) return;
+  event.preventDefault();
+  togglePanelCollapsed();
+});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (!whiteboardOverlay.hidden) {
@@ -3393,6 +3535,8 @@ events.set("ended", () => markSessionEnded());
 connectLiveEvents();
 
 applySheetState();
+applyPanelWidth();
+applyPanelCollapsed();
 render();
 setChromeOutdated(false);
 setWarningsDrawerOpen(false);
