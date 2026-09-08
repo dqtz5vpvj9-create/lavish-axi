@@ -259,6 +259,7 @@ export async function serve({
   port,
   stateFile,
   version = "",
+  build = "",
   debug = false,
   log = null,
   pollHeartbeatMs = 15_000,
@@ -654,6 +655,10 @@ export async function serve({
       ok: true,
       app: "lavish-axi",
       version,
+      // Two builds of the same version are the everyday case for a linked source checkout, whose
+      // package version never moves. The CLI compares this to decide whether replacing this
+      // server would actually change anything.
+      ...(build ? { build } : {}),
       ...(networkStale ? { network_stale: true } : {}),
       ...(networkWarning ? { network_warning: networkWarning } : {}),
     });
