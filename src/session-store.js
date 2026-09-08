@@ -58,9 +58,10 @@ export const MAX_DELIVERED_ATTACHMENTS = 256;
 // Two caps rather than one, because a prompt is user-written text with no length
 // of its own: a `/prompts` POST may carry up to the server's 2mb body limit, so a
 // count alone cannot bound the bytes and a byte budget alone cannot stop a long
-// session from accumulating entries. Trimming always drops the OLDEST entries, so
-// the newest delivery - the one a lost poll is most likely trying to recover - is
-// the last thing to go, and the newest entry is never trimmed away at all.
+// session from accumulating entries. Trimming drops whole OLDEST deliveries, so the
+// newest delivery - the one a lost poll is most likely trying to recover - is the
+// last thing to go, and is never cut down to fit either cap; like the attachment cap
+// above, these bound how much older history rides along, not the current delivery.
 export const MAX_DELIVERED_PROMPTS = 200;
 export const MAX_DELIVERED_PROMPT_BYTES = 256 * 1024;
 
@@ -255,11 +256,7 @@ export class SessionStore {
       }
     }
     session.layout_warnings = warnings;
-    const userMessages = restoring
-      ? []
-      : acceptedPrompts
-          .filter((prompt) => prompt.tag === "message" && prompt.prompt)
-          .map((prompt) => ({ role: "user", text: prompt.prompt, at: new Date().toISOString() }));
+    const userMessages = restoring ? [] : acceptedPrompts.map(chatEntryForPrompt).filter(Boolean);
     const existingPrompts = Array.isArray(session.prompts) ? session.prompts : [];
     session.prompts = restoring ? [...acceptedPrompts, ...existingPrompts] : [...existingPrompts, ...acceptedPrompts];
     session.chat = [...(session.chat || []), ...userMessages];
@@ -770,29 +767,75 @@ function normalizePrompt(prompt) {
   return { prompt: normalized, malformed };
 }
 
-// Appends one delivery to the retained history, newest last, then trims from the
-// oldest end until both caps hold. Entries are the delivered prompts verbatim plus
-// the delivery timestamp: a recovered prompt has to carry the same uid, selector,
-// tag, text, and target the poll printed, or it cannot be acted on the same way.
+// Everything a reviewer sends belongs in the transcript, not only what they typed.
+// The Conversation panel stacks queued pills and chat bubbles in one scroll region
+// under one heading, and a successful send clears the pills - so a prompt that never
+// becomes a bubble is erased from the only place the reviewer could see it, and the
+// server keeps no record of it either. Element, text and image annotations, whiteboard
+// feedback and queued layout fixes are the primary way this tool is used; they are as
+// much the conversation as a typed message is.
 //
-// The newest entry always survives, whatever it weighs. Trimming a delivery to fit
-// a constant would reopen the hole this retention exists to close - the recovery
-// path would then hand back a silently partial copy of the user's feedback, which
-// is the failure it is meant to prevent.
+// An image-only prompt carries no text of its own, so it gets the same placeholder the
+// browser shows on its pill rather than being dropped for having nothing to display.
+function chatEntryForPrompt(prompt) {
+  const isMessage = prompt.tag === "message";
+  const attachments = Array.isArray(prompt.attachments) ? prompt.attachments.length : 0;
+  const text = String(prompt.prompt || "") || (attachments ? (isMessage ? "Image message" : "Image annotation") : "");
+  if (!text) return null;
+  const entry = { role: "user", text, at: new Date().toISOString() };
+  const target = chatTargetLabel(prompt);
+  if (target) entry.target = target;
+  if (!isMessage && prompt.tag) entry.tag = String(prompt.tag);
+  return entry;
+}
+
+// What the bubble says the feedback was about, mirroring the queued pill's tooltip: a
+// table cell's visible row and column names when it has them, the CSS locator
+// otherwise, and for the targetless kinds - layout fixes, whiteboard edits - the short
+// label the browser already wrote for them.
+function chatTargetLabel(prompt) {
+  if (prompt.tag === "message") return "";
+  if (prompt.target?.type === "table-cell") {
+    const semantic = [prompt.target.rowLabel, prompt.target.columnLabel].filter(Boolean).join(" \u2192 ");
+    if (semantic) return semantic;
+  }
+  return String(prompt.selector || prompt.text || "");
+}
+
+// Appends one delivery to the retained history, newest last, then drops whole
+// deliveries from the oldest end until both caps hold. Entries are the delivered
+// prompts verbatim plus the delivery timestamp: a recovered prompt has to carry the
+// same uid, selector, tag, text, and target the poll printed, or it cannot be acted
+// on the same way.
+//
+// The unit of trimming is the delivery, not the entry, and the newest delivery is
+// exempt from both caps - the same invariant MAX_DELIVERED_ATTACHMENTS states above.
+// Cutting a delivery in half to fit a constant would reopen the hole this retention
+// exists to close: `history` would hand back a silently partial copy of one round of
+// feedback, which reads as complete and is exactly the failure being prevented. A
+// caller that asked for seven annotations and got four has no way to tell.
 function retainDeliveredPrompts(existing, prompts, deliveredAt) {
   const history = (Array.isArray(existing) ? existing : []).filter((entry) => entry && typeof entry === "object");
   for (const prompt of prompts) {
     history.push({ ...prompt, delivered_at: deliveredAt });
   }
-  const bounded = history.slice(-MAX_DELIVERED_PROMPTS);
-  const kept = [];
-  let bytes = 0;
-  for (let i = bounded.length - 1; i >= 0; i -= 1) {
-    bytes += Buffer.byteLength(JSON.stringify(bounded[i]));
-    if (kept.length > 0 && bytes > MAX_DELIVERED_PROMPT_BYTES) break;
-    kept.push(bounded[i]);
+  // Consecutive entries sharing a timestamp are one delivery. Two deliveries within
+  // the same millisecond would merge into one group, which only ever retains more
+  // than the caps ask for - never less than a whole delivery.
+  const groups = [];
+  for (const entry of history) {
+    const last = groups[groups.length - 1];
+    if (last && last.at === entry.delivered_at) last.entries.push(entry);
+    else groups.push({ at: entry.delivered_at, entries: [entry] });
   }
-  return kept.reverse();
+  let count = history.length;
+  let bytes = history.reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry)), 0);
+  while (groups.length > 1 && (count > MAX_DELIVERED_PROMPTS || bytes > MAX_DELIVERED_PROMPT_BYTES)) {
+    const dropped = groups.shift();
+    count -= dropped.entries.length;
+    bytes -= dropped.entries.reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry)), 0);
+  }
+  return groups.flatMap((group) => group.entries);
 }
 
 function layoutWarningPromptIds(prompt) {

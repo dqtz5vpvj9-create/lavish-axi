@@ -329,6 +329,10 @@ export async function serve({
   events.on("agent-presence", (key, state) => broadcastLiveEvent("agent-presence", key, { state }));
   events.on("layout-warnings", (key, warnings) => broadcastLiveEvent("layout-warnings", key, { warnings }));
   events.on("ended", (key, endedBy) => broadcastLiveEvent("ended", key, { ended_by: endedBy || null }));
+  // Without this the only chat-sync frame a page ever received was the snapshot at
+  // connection open, so a second tab or a phone on the same session showed nothing the
+  // other one sent until it reconnected.
+  events.on("chat-sync", (key, chat) => broadcastLiveEvent("chat-sync", key, { chat }));
 
   function hasLiveEventClient(key) {
     for (const clientKey of liveEventClients.values()) {
@@ -862,7 +866,12 @@ export async function serve({
         events.emit("layout-warnings", req.params.key, serializeLayoutWarnings(session.layout_warnings));
       }
       events.emit(shouldEndSession ? "ended" : "feedback", req.params.key, session.ended_by);
-      res.json({ status: "queued", pending_prompts: session.pending_prompts });
+      const chat = Array.isArray(session.chat) ? session.chat : [];
+      // The sender rebuilds its transcript from this, and every other open review of the
+      // same session gets it live, so what was just sent is visible in both without a
+      // reload - the queued pills that carried it are cleared on this response.
+      events.emit("chat-sync", req.params.key, chat);
+      res.json({ status: "queued", pending_prompts: session.pending_prompts, chat });
       if (shouldEndSession) await shutdownIfNoLiveSessions();
     } catch (error) {
       next(error);
