@@ -1217,6 +1217,9 @@ export async function serve({
       // frame-ancestors expression can name.
       res.setHeader("x-frame-options", "DENY");
       res.setHeader("content-security-policy", "frame-ancestors 'none'");
+      // Always revalidate: this page names the build it was served by, and a cached copy would
+      // hand a reloading browser the very version it is reloading to escape.
+      res.setHeader("cache-control", "no-cache");
       res.type("html").send(
         createChromeHtml(session, {
           layoutGateEnabled: shouldEnableLayoutGate(req.query || {}),
@@ -2598,6 +2601,11 @@ export function createChromeHtml(
     // event announcing a replacement only reaches a page that was connected when it happened.
     serverBuild,
   });
+  // The chrome's script and stylesheet are referenced by URL, and a browser is entitled to reuse a
+  // cached copy without asking - no Cache-Control means heuristic freshness, so a reloaded page can
+  // still be running the previous build's client. Naming the build in the URL makes a new build a
+  // new resource, which is the only way the reload is guaranteed to mean anything.
+  const assetQuery = serverBuild ? `?v=${encodeURIComponent(serverBuild)}` : "";
   const { head: pathHead, tail: pathTail } = displayPathParts(session.file);
   const bodyClass = layoutGateEnabled ? "lavish layout-gate-active" : "lavish";
   const layoutGateHidden = layoutGateEnabled ? "" : " hidden";
@@ -2610,7 +2618,7 @@ export function createChromeHtml(
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>${escapeHtml(title)}</title>
 ${faviconTag}
-<link rel="stylesheet" href="/chrome.css">
+<link rel="stylesheet" href="/chrome.css${assetQuery}">
 </head>
 <body class="${bodyClass}">
 <div class="bar"><a class="brand" href="/" target="_blank" rel="noopener" title="All Lavish sessions (opens a new tab)"><span class="brand-mark">Lavish</span><span class="brand-support">Editor</span></a><div class="spacer" aria-hidden="true"></div><div class="warnings-wrap" id="warningsWrap" hidden><button class="warnings-button" id="warningsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="warningsDrawer">${chromeIcons.warning}<span class="warnings-count" id="warningsCount">0</span></button><div class="menu warnings-drawer" id="warningsDrawer" role="dialog" aria-labelledby="warningsTitle" aria-describedby="warningsSummary" hidden><div class="warnings-head"><h2 class="warnings-title" id="warningsTitle">Layout issues</h2><p class="warnings-summary" id="warningsSummary"></p></div><div class="warnings-toolbar"><label class="warnings-selectall"><input type="checkbox" id="warningsSelectAll"><span>Select all</span></label><span class="warnings-selected" id="warningsSelected" role="status" aria-live="polite"></span></div><div class="warnings-list" id="warningsList"></div><div class="warnings-foot"><p class="warnings-note">Queueing sends a repair request with your next feedback. An issue is marked resolved only after a newer artifact load and a complete check at the same viewport no longer finds it.</p><button class="button" id="warningsQueueButton" type="button" disabled>Queue selected fixes</button></div></div></div><button class="annotate-switch" id="annotation" type="button" aria-pressed="true" title="${escapeHtml(modeToggleHint)}"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span><span>Annotate</span></button><div class="more-wrap" id="moreWrap"><button class="more-button" id="moreButton" type="button" title="More" aria-haspopup="menu" aria-expanded="false">${chromeIcons.more}</button><div class="menu more-menu" id="moreMenu" hidden><div class="menu-head"><div class="menu-label">Editing</div><button class="menu-file" id="copyPath" type="button" title="Copy path · ${escapeHtml(session.file)}">${chromeIcons.file}<span class="menu-file-text"><span class="path-head">${escapeHtml(pathHead)}</span><span class="path-tail">${escapeHtml(pathTail)}</span></span><span class="copy-hint" id="copyHint"><span class="icon-copy">${chromeIcons.copy}</span><span class="icon-check">${chromeIcons.check}</span><span id="copyHintText">Copy</span></span></button></div><div class="menu-rule"></div><button class="menu-item" id="reloadArtifact" type="button">${chromeIcons.refresh}<span>Reload artifact</span></button><button class="menu-item" id="copySnapshot" type="button">${chromeIcons.camera}<span>Copy DOM snapshot</span></button><button class="menu-item" id="exportArtifact" type="button">${chromeIcons.download}<span>Export standalone HTML</span></button><button class="menu-item" id="shareArtifact" type="button">${chromeIcons.globe}<span>Publish link</span></button><div class="menu-rule"></div><button class="menu-item danger" id="end" type="button">${chromeIcons.exit}<span>End session</span></button></div></div></div>
@@ -2621,7 +2629,7 @@ ${faviconTag}
 <div class="whiteboard-overlay" id="whiteboardOverlay" hidden><div class="whiteboard-shell"><div class="whiteboard-error" id="whiteboardError" hidden></div><button class="whiteboard-close" id="whiteboardClose" type="button" aria-label="Close whiteboard"><svg width="14" height="14" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button><iframe id="whiteboardFrame" title="Excalidraw whiteboard" sandbox="allow-scripts allow-popups"></iframe></div></div>
 <script id="lavish-session" type="application/json">${sessionJson}</script>
 <script>${CHROME_BOOT_FAILSAFE_JS}</script>
-<script src="/chrome-client.js" onerror="window.__lavishChromeBootFailed()"></script>
+<script src="/chrome-client.js${assetQuery}" onerror="window.__lavishChromeBootFailed()"></script>
 </body>
 </html>`;
 }
