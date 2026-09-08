@@ -47,6 +47,23 @@ export const MAX_REQUEST_ATTACHMENT_REFS = 256;
 // constant is what reopens the hole this retention exists to close.
 export const MAX_DELIVERED_ATTACHMENTS = 256;
 
+// Delivery is one-shot: `takeFeedback` hands the queued prompts to the poll and
+// clears them in the same write, so the reviewer's annotations exist in exactly
+// one place afterwards - the poll's stdout. A consumer that loses that output
+// (a pipeline that filters or truncates it, a killed pipe, an agent that dies
+// between the read and acting on it) destroys work the user did, with nothing
+// left to read it back from. These two caps bound the second copy that closes
+// that hole, which `lavish-axi history` reads.
+//
+// Two caps rather than one, because a prompt is user-written text with no length
+// of its own: a `/prompts` POST may carry up to the server's 2mb body limit, so a
+// count alone cannot bound the bytes and a byte budget alone cannot stop a long
+// session from accumulating entries. Trimming always drops the OLDEST entries, so
+// the newest delivery - the one a lost poll is most likely trying to recover - is
+// the last thing to go, and the newest entry is never trimmed away at all.
+export const MAX_DELIVERED_PROMPTS = 200;
+export const MAX_DELIVERED_PROMPT_BYTES = 256 * 1024;
+
 export class SessionStore {
   constructor(file) {
     this.file = file;
@@ -111,6 +128,11 @@ export class SessionStore {
       // reading the path. Every field this constructor omits is silently dropped, so
       // any new session field must be added here too.
       delivered_attachments: Array.isArray(existing.delivered_attachments) ? existing.delivered_attachments : [],
+      // Also carried across a reopen: this is the only copy of feedback the user
+      // already sent, and reopening the artifact is a routine part of acting on
+      // that feedback - dropping it here would delete the history at exactly the
+      // moment an agent is most likely to need it.
+      delivered_prompts: Array.isArray(existing.delivered_prompts) ? existing.delivered_prompts : [],
       dom_snapshot: existing.dom_snapshot || "",
       chat: existing.chat || [],
       updated_at: new Date().toISOString(),
@@ -578,6 +600,13 @@ export class SessionStore {
       const current = [...deliveredIds].map((id) => ({ id, at: deliveredNow }));
       const historyRoom = Math.max(0, MAX_DELIVERED_ATTACHMENTS - current.length);
       session.delivered_attachments = [...carried.slice(-historyRoom), ...current];
+      // The same clear that makes attachments sweepable also makes the prompts
+      // themselves unreadable, so record what just left the queue before dropping it.
+      session.delivered_prompts = retainDeliveredPrompts(
+        session.delivered_prompts,
+        prompts,
+        new Date(deliveredNow).toISOString(),
+      );
       session.prompts = [];
       session.artifact_failures = [];
       session.pending_prompts = 0;
@@ -588,6 +617,37 @@ export class SessionStore {
       session.updated_at = new Date().toISOString();
       await this.writeState(state);
       return result;
+    });
+  }
+
+  /**
+   * Prompts an earlier `takeFeedback` already delivered, oldest first. This is a pure
+   * read: it never consumes queued feedback, never touches session status, and never
+   * writes state, so recovering a lost poll cannot disturb a review loop in progress.
+   * Returns null when the file has no session at all.
+   * @param {string} key
+   * @param {{ limit?: number, sinceMs?: number }} [options]
+   * @returns {Promise<{ status: string, ended_by?: string, retained: number, prompts: any[] } | null>}
+   */
+  async listDeliveredPrompts(key, { limit = 0, sinceMs = Number.NaN } = {}) {
+    return this.runExclusive(async () => {
+      const state = await this.readState();
+      const session = state.sessions[key];
+      if (!session) return null;
+      const retained = (Array.isArray(session.delivered_prompts) ? session.delivered_prompts : []).filter(
+        (entry) => entry && typeof entry === "object",
+      );
+      const matching = Number.isNaN(sinceMs)
+        ? retained
+        : retained.filter((entry) => Date.parse(String(entry.delivered_at || "")) >= sinceMs);
+      return {
+        status: session.status || "open",
+        ...(session.ended_by ? { ended_by: session.ended_by } : {}),
+        retained: matching.length,
+        // A limit keeps the NEWEST entries: an agent asking for fewer wants the
+        // latest round of feedback, not the oldest one still retained.
+        prompts: limit > 0 ? matching.slice(-limit) : matching,
+      };
     });
   }
 
@@ -708,6 +768,31 @@ function normalizePrompt(prompt) {
   const { refs, malformed } = normalizeAttachmentRefs(prompt.attachments);
   if (refs.length > 0) normalized.attachments = refs;
   return { prompt: normalized, malformed };
+}
+
+// Appends one delivery to the retained history, newest last, then trims from the
+// oldest end until both caps hold. Entries are the delivered prompts verbatim plus
+// the delivery timestamp: a recovered prompt has to carry the same uid, selector,
+// tag, text, and target the poll printed, or it cannot be acted on the same way.
+//
+// The newest entry always survives, whatever it weighs. Trimming a delivery to fit
+// a constant would reopen the hole this retention exists to close - the recovery
+// path would then hand back a silently partial copy of the user's feedback, which
+// is the failure it is meant to prevent.
+function retainDeliveredPrompts(existing, prompts, deliveredAt) {
+  const history = (Array.isArray(existing) ? existing : []).filter((entry) => entry && typeof entry === "object");
+  for (const prompt of prompts) {
+    history.push({ ...prompt, delivered_at: deliveredAt });
+  }
+  const bounded = history.slice(-MAX_DELIVERED_PROMPTS);
+  const kept = [];
+  let bytes = 0;
+  for (let i = bounded.length - 1; i >= 0; i -= 1) {
+    bytes += Buffer.byteLength(JSON.stringify(bounded[i]));
+    if (kept.length > 0 && bytes > MAX_DELIVERED_PROMPT_BYTES) break;
+    kept.push(bounded[i]);
+  }
+  return kept.reverse();
 }
 
 function layoutWarningPromptIds(prompt) {

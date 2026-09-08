@@ -21,6 +21,7 @@ import {
   createCopilotCliSessionStartHook,
   createDesignOutput,
   createExportOutput,
+  createHistoryOutput,
   createHomeOutput,
   createOpenOutput,
   createPollOutput,
@@ -34,6 +35,8 @@ import {
   fetchJson,
   getCommandHelp,
   normalizeArgv,
+  parseHistoryLimit,
+  parseHistorySince,
   resolveShareRequest,
   pollInterruptedText,
   pollWaitBannerText,
@@ -59,7 +62,7 @@ import { resolveVsCodeSettingsFile } from "../src/plugin.js";
 import { createSkillMarkdown } from "../src/skill.js";
 import { SELF_PAINT_WARNING } from "../src/self-paint.js";
 import { serve } from "../src/server.js";
-import { canonicalFile, sessionKey } from "../src/session-store.js";
+import { canonicalFile, sessionKey, SessionStore } from "../src/session-store.js";
 
 async function waitForPollListening(base, key, timeoutMs = 10_000) {
   const socket = new WebSocket(`${base.replace(/^http/, "ws")}/events/${key}`, { origin: base });
@@ -2281,6 +2284,7 @@ test("html file arguments normalize to the hidden open command", () => {
   assert.deepEqual(normalizeArgv(["--no-open", "report.html"]), ["open", "--no-open", "report.html"]);
   assert.deepEqual(normalizeArgv(["--no-gate", "report.html"]), ["open", "--no-gate", "report.html"]);
   assert.deepEqual(normalizeArgv(["poll", "report.html"]), ["poll", "report.html"]);
+  assert.deepEqual(normalizeArgv(["history", "report.html"]), ["history", "report.html"]);
   assert.deepEqual(normalizeArgv(["setup", "hooks"]), ["setup", "hooks"]);
   assert.deepEqual(normalizeArgv(["playbook", "diagram"]), ["playbook", "diagram"]);
   assert.deepEqual(normalizeArgv(["design"]), ["design"]);
@@ -3399,3 +3403,126 @@ test("createShareUnpublishOutput separates the immediate content swap from the l
   assert.match(output.next_step, /readable without the password/i);
   assert.doesNotMatch(output.next_step, /no visitor can read the old content/i);
 });
+
+test("history output reads back a delivered batch in the shape poll printed it", () => {
+  const delivered = [
+    { uid: "1", prompt: "Tighten the header", selector: "h1", tag: "annotation", text: "Hello" },
+    { uid: "2", prompt: "Drop this row", selector: "tr", tag: "annotation", text: "Row" },
+  ];
+  const poll = createPollOutput({
+    file: "/tmp/report.html",
+    response: { status: "feedback", dom_snapshot: "", prompts: delivered },
+  });
+  const history = createHistoryOutput({
+    file: "/tmp/report.html",
+    history: {
+      status: "open",
+      retained: 2,
+      prompts: delivered.map((prompt) => ({ ...prompt, delivered_at: "2026-01-31T09:00:00.000Z" })),
+    },
+  });
+
+  assert.deepEqual(
+    history.prompts.map(withoutDeliveryTimestamp),
+    poll.prompts,
+    "a recovered prompt carries the same fields the poll printed",
+  );
+  assert.equal(history.session.file, "/tmp/report.html");
+  assert.equal(history.session.delivered_prompts, 2);
+  assert.match(history.next_step, /already delivered/);
+  assert.match(history.next_step, /does not consume queued feedback/);
+});
+
+test("history output says nothing was recorded rather than implying the feedback is gone", () => {
+  const output = createHistoryOutput({
+    file: "/tmp/report.html",
+    history: { status: "open", retained: 0, prompts: [] },
+  });
+
+  assert.deepEqual(output.prompts, []);
+  assert.match(output.next_step, /no record of feedback delivered/);
+  assert.match(output.next_step, /lavish-axi poll \/tmp\/report\.html/);
+});
+
+test("history filters are reported back and a filter Lavish cannot read is refused", () => {
+  const output = createHistoryOutput({
+    file: "/tmp/report.html",
+    history: { status: "ended", ended_by: "user", retained: 5, prompts: [] },
+    limit: 3,
+    since: "2026-01-31T09:00:00Z",
+  });
+  assert.equal(output.session.status, "ended");
+  assert.equal(output.session.ended_by, "user");
+  assert.equal(output.session.limit, 3);
+  assert.equal(output.session.since, "2026-01-31T09:00:00Z");
+
+  assert.equal(parseHistoryLimit(null), 0);
+  assert.equal(parseHistoryLimit("20"), 20);
+  assert.equal(parseHistorySince("2026-01-31T09:00:00Z"), Date.parse("2026-01-31T09:00:00Z"));
+  assert.ok(Number.isNaN(parseHistorySince(null)));
+  // Ignoring an unreadable filter would read as "this is everything since then".
+  for (const bad of ["0", "-1", "2.5", "twenty", ""]) {
+    assert.throws(() => parseHistoryLimit(bad), AxiError, `--limit ${bad} is refused`);
+  }
+  assert.throws(() => parseHistorySince("last tuesday"), AxiError);
+});
+
+test("poll guidance points at history as the way to re-read a consumed delivery", () => {
+  const help = getCommandHelp("poll");
+  assert.match(help, /Delivery is one-shot/);
+  assert.match(help, /lavish-axi history <html-file>/);
+
+  const historyHelp = getCommandHelp("history");
+  assert.match(historyHelp, /Usage: lavish-axi history <html-file>/);
+  assert.match(historyHelp, /--limit <n>/);
+  assert.match(historyHelp, /--since <iso8601>/);
+  assert.match(historyHelp, /read-only/);
+});
+
+test("history reads a consumed delivery back without starting a server", async () => {
+  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-history-test-`);
+  try {
+    const artifact = path.join(stateDir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>", "utf8");
+    const store = new SessionStore(path.join(stateDir, "state.json"));
+    const session = await store.upsertSession(artifact, "http://127.0.0.1:4387/session/test");
+    await store.queuePrompts(session.key, {
+      domSnapshot: 'uid=1 h1 "Hello"',
+      prompts: [{ uid: "1", prompt: "Tighten the header", selector: "h1", tag: "annotation", text: "Hello" }],
+    });
+    await store.takeFeedback(session.key);
+
+    // An unroutable port: `history` must not fall back to spawning or dialing a server,
+    // because the output it recovers is usually lost precisely when something died.
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "history", artifact],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LAVISH_AXI_STATE_DIR: stateDir,
+          LAVISH_AXI_PORT: "1",
+          LAVISH_AXI_TELEMETRY: "0",
+        },
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Tighten the header/);
+    assert.match(result.stdout, /delivered_prompts: 1/);
+    assert.equal(existsSync(path.join(stateDir, "server.log")), false, "no server was started");
+
+    const after = await store.findByKey(session.key);
+    assert.deepEqual(after.prompts, [], "reading history left the queue as the poll left it");
+    assert.equal(after.status, "open");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+function withoutDeliveryTimestamp(entry) {
+  const prompt = { ...entry };
+  delete prompt.delivered_at;
+  return prompt;
+}
