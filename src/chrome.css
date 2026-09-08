@@ -904,6 +904,7 @@ body.lavish {
   overflow: hidden;
 }
 .panel {
+  position: relative;
   width: var(--panel-w);
   border-left: var(--hairline-subtle);
   background: var(--bg-panel);
@@ -911,6 +912,97 @@ body.lavish {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+/* The drag target straddles the panel's left edge rather than taking a grid track of its
+   own, so the panel's own width stays exactly --panel-w and the artifact keeps the rest. */
+.panel-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 10px;
+  transform: translateX(-50%);
+  z-index: 4;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.panel-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease);
+}
+.panel-resizer:hover::after,
+.panel-resizer:focus-visible::after,
+body.panel-resizing .panel-resizer::after {
+  background: var(--accent);
+}
+body.panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* Pointer events during a drag would otherwise land inside the artifact document and the
+   drag would stall the moment the cursor crossed into it. */
+body.panel-resizing .frame {
+  pointer-events: none;
+}
+.panel-collapse {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-left: 4px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+.panel-collapse:hover {
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+body.panel-collapsed .layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+body.panel-collapsed .panel {
+  display: none;
+}
+/* The way back. Without it, hiding the panel would be a one-way door for anyone who did not
+   know the shortcut. */
+.panel-restore {
+  position: fixed;
+  top: calc(var(--bar-h) + 12px);
+  right: 0;
+  z-index: 20;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: var(--hairline);
+  border-right: 0;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  background: var(--bg-panel);
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--w-bold);
+  cursor: pointer;
+}
+.panel-restore:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+body.panel-collapsed .panel-restore {
+  display: flex;
 }
 /* Desktop keeps the panel's original flex children: the head wrappers exist only so the phone
    layout can turn the heading into a dock, and they are transparent to layout everywhere else. */
@@ -1431,6 +1523,17 @@ body.layout-gate-active iframe#artifact {
   .frame {
     padding: 0 env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
     background: var(--bg-bar);
+  }
+  /* The sheet has its own dock, chevron and drag handle; a width drag and a hide control
+     that removes the only way back to the conversation have no meaning here. */
+  .panel-resizer,
+  .panel-collapse,
+  .panel-restore,
+  body.panel-collapsed .panel-restore {
+    display: none;
+  }
+  body.panel-collapsed .panel {
+    display: flex;
   }
   .panel {
     position: fixed;

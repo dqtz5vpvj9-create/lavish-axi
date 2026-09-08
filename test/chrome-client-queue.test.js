@@ -32,6 +32,7 @@ async function createChromeHarness({
   sessionData = defaultSessionData,
   artifactSrc = "",
   storage = new Map(),
+  localStore = new Map(),
   beginLoadResponses = [],
   handoffResponses = [],
   storedQueue = null,
@@ -54,6 +55,7 @@ async function createChromeHarness({
   const windowListeners = new Map();
   const documentListeners = new Map();
   const elements = new Map();
+  const cssVars = new Map();
   const timers = new Map();
   const srcLoads = [];
   const beginRequests = [];
@@ -325,6 +327,18 @@ async function createChromeHarness({
     },
     document: {
       body: element("body"),
+      // The chrome writes its layout custom properties here, so a test can read back what the
+      // page would actually be laid out with.
+      documentElement: {
+        style: {
+          setProperty(name, value) {
+            cssVars.set(name, String(value));
+          },
+          removeProperty(name) {
+            cssVars.delete(name);
+          },
+        },
+      },
       get activeElement() {
         return activeElement;
       },
@@ -358,9 +372,21 @@ async function createChromeHarness({
         storage.delete(key);
       },
     },
+    localStorage: {
+      getItem(key) {
+        return localStore.has(key) ? localStore.get(key) : null;
+      },
+      setItem(key, value) {
+        localStore.set(key, String(value));
+      },
+      removeItem(key) {
+        localStore.delete(key);
+      },
+    },
     window: {
       clearTimeout: fakeClearTimeout,
       setTimeout: fakeSetTimeout,
+      innerWidth: 1440,
       addEventListener(type, handler) {
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(handler);
@@ -395,6 +421,10 @@ async function createChromeHarness({
   return {
     element,
     frame,
+    cssVar(name) {
+      return cssVars.get(name) || null;
+    },
+    localStore,
     postedToFrame,
     postedToWhiteboard,
     createInlineWhiteboard() {
@@ -5376,6 +5406,58 @@ function sheetState(chrome) {
     stored: chrome.storage.get("lavish-axi:sheet-open:abc") || null,
   };
 }
+
+test("the desktop panel can be dragged wider and the width is remembered", async () => {
+  const chrome = await createChromeHarness();
+  assert.equal(chrome.cssVar("--panel-w"), "360px", "the stock width is unchanged");
+
+  const resizer = chrome.element("panelResizer");
+  resizer.dispatch("pointerdown", { pointerId: 1, clientX: 1080, preventDefault() {} });
+  // The panel is on the right, so dragging left widens it.
+  resizer.dispatch("pointermove", { pointerId: 1, clientX: 900 });
+  assert.equal(chrome.cssVar("--panel-w"), "540px");
+  resizer.dispatch("pointerup", { pointerId: 1 });
+  assert.equal(chrome.localStore.get("lavish-axi:panel-width"), "540");
+
+  // Past the point where the artifact would be squeezed out, the drag stops widening.
+  resizer.dispatch("pointerdown", { pointerId: 2, clientX: 900, preventDefault() {} });
+  resizer.dispatch("pointermove", { pointerId: 2, clientX: 20 });
+  resizer.dispatch("pointerup", { pointerId: 2 });
+  assert.equal(chrome.cssVar("--panel-w"), "720px", "the panel stops at its maximum");
+
+  resizer.dispatch("dblclick", {});
+  assert.equal(chrome.cssVar("--panel-w"), "360px", "double-click puts it back");
+});
+
+test("the desktop panel can be hidden and brought back", async () => {
+  const chrome = await createChromeHarness();
+  const body = chrome.element("body");
+  assert.equal(body.classList.contains("panel-collapsed"), false);
+
+  chrome.element("panelCollapse").onclick();
+  assert.equal(body.classList.contains("panel-collapsed"), true);
+  assert.equal(chrome.localStore.get("lavish-axi:panel-collapsed"), "1");
+  // Hiding the panel hides the button that hid it, so focus has to land on the way back.
+  assert.equal(chrome.element("panelRestore").focused, true);
+
+  chrome.element("panelRestore").onclick();
+  assert.equal(body.classList.contains("panel-collapsed"), false);
+  assert.equal(chrome.localStore.has("lavish-axi:panel-collapsed"), false);
+});
+
+test("a stored panel preference applies on the next page load", async () => {
+  const chrome = await createChromeHarness({
+    localStore: new Map([
+      ["lavish-axi:panel-width", "480"],
+      ["lavish-axi:panel-collapsed", "1"],
+    ]),
+  });
+
+  assert.equal(chrome.cssVar("--panel-w"), "480px");
+  assert.equal(chrome.element("body").classList.contains("panel-collapsed"), true);
+  // A boot must not steal focus from the page the user is reading.
+  assert.notEqual(chrome.element("panelRestore").focused, true);
+});
 
 test("desktop chrome never turns the conversation panel into a sheet", async () => {
   const chrome = await createChromeHarness();
