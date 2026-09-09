@@ -3346,6 +3346,65 @@ test("a new build changes the chrome's asset URLs so a reload cannot serve the o
   }
 });
 
+test("a review's whole conversation is readable and exportable", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><head><title>Checkout redesign</title></head><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+    await fetch(`${base}/api/${opened.key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({
+        prompts: [{ uid: "1", prompt: "Tighten this", selector: "h1", tag: "annotation", text: "Title" }],
+      }),
+    });
+    await fetch(`${base}/api/${opened.key}/agent-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ text: "Tightened it." }),
+    });
+
+    const json = await fetch(`${base}/api/${opened.key}/transcript`).then((response) => response.json());
+    assert.deepEqual(
+      json.entries.map((entry) => [entry.role, entry.text]),
+      [
+        ["user", "Tighten this"],
+        ["agent", "Tightened it."],
+      ],
+    );
+
+    const markdown = await fetch(`${base}/api/${opened.key}/transcript?format=markdown&download=1`);
+    const text = await markdown.text();
+    // A review is often the only record of why something changed, so it has to be possible to
+    // keep it somewhere that is not Lavish.
+    assert.match(markdown.headers.get("content-type") || "", /text\/markdown/);
+    assert.match(markdown.headers.get("content-disposition") || "", /attachment; filename="artifact\.transcript\.md"/);
+    assert.match(text, /# Checkout redesign/);
+    assert.match(text, /## Reviewer/);
+    assert.match(text, /Tighten this/);
+    assert.match(text, /## Agent/);
+
+    const page = await fetch(`${base}/session/${opened.key}/transcript`).then((response) => response.text());
+    assert.match(page, /<title>Checkout redesign · Lavish<\/title>/);
+
+    // Reading a conversation must not consume the review it belongs to.
+    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeout_ms=200`).then((response) =>
+      response.json(),
+    );
+    assert.equal(poll.status, "feedback");
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("the server's front page lists every review, and the chrome links back to it", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const project = path.join(dir, "checkout", ".lavish");

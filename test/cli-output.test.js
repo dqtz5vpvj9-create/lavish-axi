@@ -52,6 +52,7 @@ import {
   shouldNarratePollWaitTicks,
   shouldOpenBrowser,
   shouldRestartServer,
+  createTranscriptOutput,
   startPollWaitReporter,
   stopCommand,
   telemetryCommandName,
@@ -2789,6 +2790,34 @@ test("a linked checkout is recognised through the symlink npm put on PATH", asyn
   // `npm link` is the documented way to run a checkout, and argv[1] is then the symlink. Comparing
   // the paths as written made a linked build look like somebody else's install and never restart.
   assert.equal(shouldForceRestartForLocalBuild(link, true), true);
+});
+
+test("the transcript output is the review conversation, and says what it did not touch", () => {
+  const document = {
+    file: "/tmp/review.html",
+    status: "open",
+    updated_at: "2026-09-08T10:00:00.000Z",
+    pending_prompts: 2,
+    entries: [
+      { role: "user", text: "Tighten this", at: "2026-09-08T09:00:00.000Z", target: "h1" },
+      { role: "agent", text: "Done.", at: "2026-09-08T09:05:00.000Z" },
+    ],
+  };
+
+  const printed = createTranscriptOutput({ file: "/tmp/review.html", document, title: "Review" });
+  assert.equal(printed.session.entries, 2);
+  // Queued feedback is counted, not included: it is not part of the conversation until it has
+  // been delivered, and an export that quietly included it would misreport what was said.
+  assert.equal(printed.session.queued_not_yet_sent, 2);
+  assert.match(printed.transcript, /^# Review/);
+  assert.match(printed.transcript, /## Reviewer · 2026-09-08T09:00:00.000Z/);
+  assert.match(printed.transcript, /> h1/);
+  assert.match(printed.transcript, /## Agent/);
+  assert.match(printed.next_step, /changed nothing/);
+
+  const written = createTranscriptOutput({ file: "/tmp/review.html", document, written: "/tmp/out.md" });
+  assert.equal(written.written, "/tmp/out.md");
+  assert.equal(written.transcript, undefined, "a file export does not also dump the whole thing to stdout");
 });
 
 test("shouldRestartServer reuses a server running the same version", () => {
