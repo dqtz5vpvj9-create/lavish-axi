@@ -651,6 +651,10 @@ body.lavish {
   background: transparent;
   color: var(--fg);
 }
+/* One item in this menu is a link rather than a button, because it opens a page. */
+a.menu-item {
+  text-decoration: none;
+}
 .menu-item:hover:not(:disabled) {
   background: var(--steel-700);
 }

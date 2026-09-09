@@ -16,6 +16,8 @@ import { fileURLToPath } from "node:url";
 
 import { AxiError, installSessionStartHooks, RESERVED_COMMANDS, runAxiCli } from "axi-sdk-js";
 
+import { transcriptDocument, transcriptMarkdown } from "./transcript.js";
+
 import { createDesignOutput, DESIGN_PRIORITY_RULE, DESIGN_SYSTEM_HINT } from "./design-reference.js";
 import {
   buildSelfContainedHtml,
@@ -44,7 +46,7 @@ import {
 } from "./plugin.js";
 import { findPlaybook, listPlaybooks, playbookIds, PLAYBOOK_ROUTER_HELP } from "./playbooks.js";
 import { analyzeSelfPaint, SELF_PAINT_WARNING } from "./self-paint.js";
-import { resolveDesignAssetPath, serve } from "./server.js";
+import { extractArtifactHead, resolveDesignAssetPath, serve } from "./server.js";
 import { canonicalFile, MAX_DELIVERED_PROMPTS, sessionKey, SessionStore } from "./session-store.js";
 import { generateSharePassword } from "./share-password.js";
 import { initDefaultTelemetry } from "./telemetry.js";
@@ -54,6 +56,7 @@ const COMMANDS = new Set([
   "open",
   "poll",
   "history",
+  "transcript",
   "end",
   "stop",
   "server",
@@ -144,6 +147,7 @@ export async function run(argv) {
         open: openCommand,
         poll: pollCommand,
         history: historyCommand,
+        transcript: transcriptCommand,
         end: endCommand,
         stop: stopCommand,
         playbook: playbookCommand,
@@ -549,6 +553,51 @@ async function historyCommand(args) {
     throw new AxiError("No Lavish Editor session for this file", "NOT_FOUND", [`Run \`lavish-axi ${absolute}\` first`]);
   }
   return createHistoryOutput({ file: absolute, history, limit, since: since || "" });
+}
+
+// The conversation as a document. `history` answers "what did the last poll hand me"; this answers
+// "what has this review said, from the beginning" - the record a reviewer keeps, quotes in a commit
+// message, or hands to someone who was not there. Like `history` it reads the store directly, so it
+// neither consumes queued feedback nor starts a server.
+async function transcriptCommand(args) {
+  const file = firstPositionalArg(args, ["--out"]);
+  if (!file) {
+    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi transcript <html-file>`"]);
+  }
+  const absolute = await canonicalFile(file);
+  const store = new SessionStore(stateFile());
+  const session = await store.findByKey(sessionKey(absolute));
+  if (!session) {
+    throw new AxiError("No Lavish Editor session for this file", "NOT_FOUND", [`Run \`lavish-axi ${absolute}\` first`]);
+  }
+  const document = transcriptDocument(session);
+  // The artifact's own title, so an exported review is named the way the page is - the file name
+  // is what is left when the page never said.
+  const { title } = extractArtifactHead(await readFile(absolute, "utf8").catch(() => ""));
+  const asJson = args.includes("--json");
+  const out = flagValue(args, "--out");
+  const body = asJson ? JSON.stringify(document, null, 2) : transcriptMarkdown(document, { title });
+  if (!out) return createTranscriptOutput({ file: absolute, document, title, written: "" });
+  const target = path.resolve(out);
+  await writeFile(target, body, "utf8");
+  return createTranscriptOutput({ file: absolute, document, title, written: target });
+}
+
+/** @returns {any} */
+export function createTranscriptOutput({ file, document, title = "", written = "" }) {
+  return {
+    session: {
+      file,
+      status: document.status,
+      ...(document.ended_by ? { ended_by: document.ended_by } : {}),
+      entries: document.entries.length,
+      ...(document.pending_prompts > 0 ? { queued_not_yet_sent: document.pending_prompts } : {}),
+    },
+    ...(written ? { written } : { transcript: transcriptMarkdown(document, { title }) }),
+    next_step: written
+      ? `Wrote the review conversation to ${written}. Reading it changed nothing: queued feedback, session status and the server are untouched.`
+      : "This is the whole review conversation, oldest first. Pass --out <path> to write it to a file, or --out with --json for the structured form. Reading it changed nothing: queued feedback, session status and the server are untouched.",
+  };
 }
 
 // A limit or a timestamp Lavish cannot read is refused rather than ignored: silently
@@ -1964,7 +2013,7 @@ export function getCommandHelp(command, { agent = "generic" } = {}) {
 }
 
 function createTopLevelHelp({ agent = "generic" } = {}) {
-  return `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n  lavish-axi poll <html-file> [--agent-reply "..."]\n  lavish-axi history <html-file> [--limit <n>] [--since <iso8601>]\n  lavish-axi end <html-file>\n  lavish-axi export <html-file> [--out <path>]\n  lavish-axi share <html-file> [--private | --password <pw>] [--token <t>]\n  lavish-axi share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  lavish-axi share --unpublish --site <site_id> --update-key <key>\n  lavish-axi stop\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi setup hooks\n  lavish-axi setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the Lavish top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. Delivery is one-shot: a poll clears the prompts as it hands them over, so read the whole response before filtering or truncating it, and run \`lavish-axi history <html-file>\` to re-read a delivered batch whose output was lost. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
+  return `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n  lavish-axi poll <html-file> [--agent-reply "..."]\n  lavish-axi history <html-file> [--limit <n>] [--since <iso8601>]\n  lavish-axi transcript <html-file> [--json] [--out <path>]\n  lavish-axi end <html-file>\n  lavish-axi export <html-file> [--out <path>]\n  lavish-axi share <html-file> [--private | --password <pw>] [--token <t>]\n  lavish-axi share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  lavish-axi share --unpublish --site <site_id> --update-key <key>\n  lavish-axi stop\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi setup hooks\n  lavish-axi setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the Lavish top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. Delivery is one-shot: a poll clears the prompts as it hands them over, so read the whole response before filtering or truncating it, and run \`lavish-axi history <html-file>\` to re-read a delivered batch whose output was lost. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
 }
 
 function createCommandHelp({ agent = "generic" } = {}) {
@@ -1972,6 +2021,7 @@ function createCommandHelp({ agent = "generic" } = {}) {
     open: `Usage: lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n\nOpen or resume a Lavish Editor review session for an HTML artifact. Use --no-open when you need to ensure the server/session exists without opening another browser window. Use --no-gate to skip the open-time layout curtain for this browser open. If the user explicitly ended the session from the browser, this refuses to reopen it and returns guidance instead - pass --reopen to force it open when the user asks for further review or something important needs their visual attention. Sessions ended by the agent (\`lavish-axi end\`) reopen normally without the flag.\n`,
     poll: `Usage: lavish-axi poll <html-file> [--agent-reply "..."]\n\nThis command long-polls indefinitely for queued user prompts. It stays silent while it waits - that is normal, never kill it. Browser-detected layout issues do NOT return this poll: they are filed passively in the user's Layout issues inbox and arrive as an ordinary tag "layout-warnings" prompt only after the user selects them and queues the fixes. Warning lifecycle: an issue stays unresolved and counted while queued, becomes recurring if a newer artifact revision still shows it, and is resolved only after a newer artifact load plus a complete diagnostic pass at the same viewport no longer detects it. A failed or incomplete pass preserves it as unverified rather than clearing it. The only response that arrives without user action is artifact_failures - a fatal failure that made the review surface itself unusable. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} Use --agent-reply after applying prior feedback to display your response in Lavish Editor before waiting again. Delivery is one-shot - the prompts are cleared in the same write that hands them over - so read the whole response before filtering or truncating it; \`lavish-axi history <html-file>\` re-reads what an earlier poll already delivered. ${POLL_SEND_AND_END_RULE}\n`,
     history: `Usage: lavish-axi history <html-file> [--limit <n>] [--since <iso8601>]\n\nRe-read user feedback an earlier \`lavish-axi poll\` already delivered, oldest last. Poll delivery is one-shot - it hands the queued prompts over and clears them in the same write - so this is the way to recover a batch whose output was truncated, filtered by a pipeline, or lost with the process that received it. It is read-only: it does not consume queued feedback, change session status, or start the server, so it is safe to run at any point in a review loop. Lavish retains the ${MAX_DELIVERED_PROMPTS} most recent delivered prompts per session within a bounded byte budget, trimming the oldest first; entries exist only for deliveries this Lavish recorded. --limit <n> returns the newest n entries, --since <iso8601> only those delivered at or after that timestamp. A limit or timestamp Lavish cannot read is refused rather than ignored.\n`,
+    transcript: `Usage: lavish-axi transcript <html-file> [--json] [--out <path>]\n\nPrint the whole review conversation - every annotation, message and agent reply, oldest first - as Markdown. This is the record of a review: what to quote in a commit message, attach to an issue, or hand to someone who was not in it. \`history\` is a different thing: it re-reads the agent-facing payload of one delivered poll, for recovery. --json returns the structured form, --out <path> writes to a file instead of returning the text. Read-only: it does not consume queued feedback, change session status, or start the server. Feedback that is queued but not yet sent is counted, not included, because it is not part of the conversation until it is delivered.\n`,
     end: `Usage: lavish-axi end <html-file>\n\nEnd a Lavish Editor session as the agent. A session ended this way still reopens normally on the next \`lavish-axi <html-file>\`, unlike a user ending it from the browser, which requires --reopen.\n`,
     export: `Usage: lavish-axi export <html-file> [--out <path>]\n\nWrite a portable copy of an artifact: one HTML file with its LOCAL assets inlined (relative-path stylesheets, scripts, images, and fonts become inline <style>/<script> blocks and data URIs). Remote CDN/font references (https URLs) are left as links for the browser to load, so the file needs network to render those. Lavish makes no outbound requests - it only reads local files, confined to the artifact's directory. Defaults to writing <name>.export.html next to the source; pass --out to choose a path. The Lavish annotation SDK is never included in an export.\n`,
     share: `Usage:\n  lavish-axi share <html-file> [--private | --password <pw>] [--token <t>]\n  lavish-axi share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  lavish-axi share --unpublish --site <site_id> --update-key <key>\n\nPublish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of Lavish, and print a visitable URL. Shares are PUBLIC by default: anyone with the link can open the page, and it may be indexed or scraped. Pass --private to publish a PRIVATE page behind a generated password, returned once in the output - give it to the user with the URL and tell them it is a shared secret. Pass --password <pw> instead when the user chose the password; it is never echoed back. Builds the same local-inlined HTML as 'export' (local assets inlined; remote CDN/font URLs left as links and are not blocked by CSP on ht-ml.app, but still load over the viewer's network), then POSTs it to ht-ml.app's /v1 API. Creating a site needs no account or API key. The response includes the url plus a secret update_key (shown once) for changing the page later.\n\n--site <site_id> with --update-key <key> republishes an existing page in place: same URL, new HTML. On a republish the password is left alone unless you pass --private (rotate to a new generated one) or --password <pw> (set one). There is no way to make a private page public again: ht-ml.app accepts a request to clear a password and silently ignores it, so Lavish does not offer one rather than reporting a page as public while it is still gated. Locking a page that was PUBLIC is also not instant at ht-ml.app's CDN: it was observed still answering uncredentialed requests for minutes after the password was set, so do not tell the user a newly gated page is unreachable right away (a page that was already private has no such cached copy).\n\n--unpublish takes the same credentials and no file. ht-ml.app has NO delete endpoint, so this replaces the page with a short placeholder and locks it behind a random password that is immediately discarded; the URL still resolves and the host still holds what was published. Say that to the user rather than calling it deleted. The update_key still works, so republishing with --private brings the page back behind a new password.\n\nA value flag given an empty or whitespace-only value is REFUSED rather than acted on: an unquoted shell variable that is unset makes \`--password $PW\` an empty password, which the host treats as none and would publish a PUBLIC page while you believed it was gated. Quote the value, or pass --private to have Lavish generate one.\n\nSet LAVISH_AXI_HTML_APP_TOKEN (or pass --token) to attach an optional bearer token when CREATING a page; it is never required. A republish (--site/--update-key) or --unpublish rejects --token, because the update_key is what the Authorization header carries there. The annotation SDK is never included.\n`,
