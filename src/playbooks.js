@@ -229,6 +229,39 @@ export const PLAYBOOKS = [
     ],
   },
   {
+    id: "explanation",
+    use_when:
+      "Explain an existing system, PR, incident, or decision to a reader who was not there - when the goal is understanding what is and why, not choosing a direction or inspecting a plan before implementation",
+    choose: [
+      "Use this when the reader needs to understand something that already exists: a PR's mechanism, an incident's root cause, an architecture, a past decision.",
+      "Use the plan playbook when the reader must inspect and approve an approach before implementation begins; use comparison when they must choose between options.",
+      "Combine with diagram for flows or architecture, table for evidence inventories, and code when the mechanism lives in specific lines.",
+    ],
+    structure: [
+      "Lead with the one-sentence answer to the question the reader actually has, before any mechanism.",
+      "Then show only what changed or how it works - a flow or before/after of the relevant slice, not a diagram of the whole system.",
+      "Keep evidence (file paths, line references, links, commands) subordinate to the narrative: cited where a claim needs support, never inlined wholesale.",
+      "Make each claim its own section or annotation target so the reader can push back on exactly the part they disagree with.",
+      "End with what was deliberately left out and where to look next, not a summary that restates the piece.",
+    ],
+    design_rules: [
+      "Define unfamiliar terms at first use; for the reader's starting point, follow the diagram playbook's assume-nothing rule rather than restating it here.",
+      "Name the question the explanation answers at the top, so the reader knows whether it is their question.",
+      "Put prose beside figures - inline SVG for the flow or before/after, HTML for the reasoning - per the diagram playbook.",
+      "Link evidence rather than pasting logs or diffs; inlined evidence buries the narrative and goes stale.",
+      "Distinguish verified claims (cited to files, commands, or links) from inference; label uncertain reasoning as a question.",
+    ],
+    pitfalls: [
+      "Do not restate the PR body, diff, or ticket file-by-file; the source documents already exist and the reader can open them.",
+      "Do not bury the answer under a diagram of the entire system when the question is about one slice of it.",
+      "Do not present inferred reasoning as verified fact; cite or label it.",
+    ],
+    lavish_notes: [
+      "A Lavish explanation should let the reader annotate the exact claim they doubt or want expanded.",
+      "When an explanation surfaces a disagreement, queue prompts that name the claim and the evidence gap.",
+    ],
+  },
+  {
     id: "slides",
     use_when: "Create a deliberate presentation when slides are requested",
     choose: [

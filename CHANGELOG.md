@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.1.76](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.75...lavish-axi-v0.1.76) (2026-09-21)
+
+
+### Features
+
+* **chrome:** add revision legend for agent-declared artifact edits ([#361](https://github.com/kunchenguid/lavish-axi/issues/361)) ([b4e82c6](https://github.com/kunchenguid/lavish-axi/commit/b4e82c63563cc9b4feaf947db53ec44902d10fb8))
+
+## [0.1.75](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.74...lavish-axi-v0.1.75) (2026-09-20)
+
+
+### Features
+
+* add exclusive visible poll listeners ([#358](https://github.com/kunchenguid/lavish-axi/issues/358)) ([d5ac546](https://github.com/kunchenguid/lavish-axi/commit/d5ac5468e5db3099d08c574c120472c75f5374d2))
+
+## [0.1.74](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.73...lavish-axi-v0.1.74) (2026-09-20)
+
+
+### Features
+
+* **poll:** add opt-in Herdr readiness chime ([#355](https://github.com/kunchenguid/lavish-axi/issues/355)) ([20159e0](https://github.com/kunchenguid/lavish-axi/commit/20159e0726ba73c9e19db08a388dd1aa5673028c))
+
+
+### Bug Fixes
+
+* **server:** record startup and runtime failures ([#357](https://github.com/kunchenguid/lavish-axi/issues/357)) ([2430a3f](https://github.com/kunchenguid/lavish-axi/commit/2430a3fed654ff46354f987a8dbc4896552fdf0b))
+
+## [0.1.73](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.72...lavish-axi-v0.1.73) (2026-09-19)
+
+
+### Bug Fixes
+
+* **server:** make live-review failures recoverable ([#353](https://github.com/kunchenguid/lavish-axi/issues/353)) ([c5bdea4](https://github.com/kunchenguid/lavish-axi/commit/c5bdea49c684ffd074a07d19232783dc37f6605e))
+
+## [0.1.72](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.71...lavish-axi-v0.1.72) (2026-09-17)
+
+
+### Features
+
+* **playbooks:** add explanation playbook for existing systems ([#347](https://github.com/kunchenguid/lavish-axi/issues/347)) ([a3504db](https://github.com/kunchenguid/lavish-axi/commit/a3504db27f00aef1a8d6413a7a3db637833bf603))
+
+## [0.1.71](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.70...lavish-axi-v0.1.71) (2026-09-16)
+
+
+### Bug Fixes
+
+* **cli:** preserve structure in longer agent replies ([#342](https://github.com/kunchenguid/lavish-axi/issues/342)) ([5d72def](https://github.com/kunchenguid/lavish-axi/commit/5d72def61d1cb5be2e54e61941d083eb1fa78426))
+
+## [0.1.70](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.69...lavish-axi-v0.1.70) (2026-09-16)
+
+
+### Bug Fixes
+
+* bound stored review transcripts ([#340](https://github.com/kunchenguid/lavish-axi/issues/340)) ([93eb9c0](https://github.com/kunchenguid/lavish-axi/commit/93eb9c08fd451fd0d44f6185b8babd50a4d4d709))
+
+## [0.1.69](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.68...lavish-axi-v0.1.69) (2026-09-16)
+
+
+### Features
+
+* add structured conversation history ([#337](https://github.com/kunchenguid/lavish-axi/issues/337)) ([c95f3c4](https://github.com/kunchenguid/lavish-axi/commit/c95f3c474beebcb0f0df09a5e90ef5ab5633bb84))
+
+
+### Bug Fixes
+
+* settle queued feedback by durable prompt identity ([#339](https://github.com/kunchenguid/lavish-axi/issues/339)) ([7f1c477](https://github.com/kunchenguid/lavish-axi/commit/7f1c47744773a3db5f1af97bd256a347ee9680b8))
+
+## [0.1.68](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.67...lavish-axi-v0.1.68) (2026-09-15)
+
+
+### Bug Fixes
+
+* **chrome:** prevent feedback from stalling during snapshot capture ([#334](https://github.com/kunchenguid/lavish-axi/issues/334)) ([830efa8](https://github.com/kunchenguid/lavish-axi/commit/830efa80da49dda662232594630bf0c4e459fee8))
+
 ## [0.1.67](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.66...lavish-axi-v0.1.67) (2026-09-07)
 
 

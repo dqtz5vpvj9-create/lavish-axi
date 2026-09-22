@@ -15,6 +15,7 @@ import {
   serializeLayoutWarnings,
 } from "./layout-warnings.js";
 import { AsyncMutex } from "./async-mutex.js";
+import { boundStoredChat, chatEntryForPrompt, collectChatAckIds, normalizePromptId } from "./chat-messages.js";
 import { normalizeMermaidNodeTarget } from "./mermaid-node.js";
 import { EXCALIDRAW_SCENE_TARGET_TYPE, normalizeExcalidrawSceneTarget } from "./whiteboard-core.js";
 
@@ -191,6 +192,10 @@ export class SessionStore {
         existing.artifact_storage && typeof existing.artifact_storage === "object" ? existing.artifact_storage : {},
       dom_snapshot: existing.dom_snapshot || "",
       chat: existing.chat || [],
+      chat_revision: normalizeRevision(existing.chat_revision),
+      // Compact prompt_id acks for bubbles evicted by the stored-chat byte bound. Reopening
+      // must keep them: they are the settlement/dedup source once the visible entry is gone.
+      chat_ack_ids: Array.isArray(existing.chat_ack_ids) ? existing.chat_ack_ids : [],
       updated_at: new Date().toISOString(),
     };
     state.sessions[key] = session;
@@ -239,7 +244,22 @@ export class SessionStore {
     if (alreadyEnded && !restoring) {
       return { ended: true, ended_by: session.ended_by };
     }
-    const normalized = prompts.map(normalizePrompt);
+    let normalized = prompts.map(normalizePrompt);
+    if (!restoring) {
+      const acknowledgedIds = new Set(
+        [
+          ...(session.chat || []).map((entry) => normalizePromptId(entry?.prompt_id)),
+          ...(session.chat_ack_ids || []).map((id) => normalizePromptId(id)),
+        ].filter(Boolean),
+      );
+      normalized = normalized.filter(({ prompt }) => {
+        const promptId = normalizePromptId(prompt.prompt_id);
+        if (!promptId) return true;
+        if (acknowledgedIds.has(promptId)) return false;
+        acknowledgedIds.add(promptId);
+        return true;
+      });
+    }
     const normalizedPrompts = normalized.map((entry) => entry.prompt);
     // Resolve every attachment BEFORE mutating anything. If any prompt's images
     // can't be fully honored - malformed, an unknown id, or over the per-prompt
@@ -311,10 +331,18 @@ export class SessionStore {
       }
     }
     session.layout_warnings = warnings;
-    const userMessages = restoring ? [] : acceptedPrompts.map(chatEntryForPrompt).filter(Boolean);
+    // Every accepted prompt with something to display joins the transcript, not only composer
+    // messages: the notes a reviewer sends are the half of the conversation the panel used to
+    // lose on send.
+    const userMessages = restoring
+      ? []
+      : acceptedPrompts.map((prompt) => chatEntryForPrompt(prompt, at)).filter(Boolean);
     const existingPrompts = Array.isArray(session.prompts) ? session.prompts : [];
-    session.prompts = restoring ? [...acceptedPrompts, ...existingPrompts] : [...existingPrompts, ...acceptedPrompts];
+    const storedPrompts = restoring ? acceptedPrompts : acceptedPrompts.map(agentFacingPrompt);
+    session.prompts = restoring ? [...storedPrompts, ...existingPrompts] : [...existingPrompts, ...storedPrompts];
     session.chat = [...(session.chat || []), ...userMessages];
+    applyTranscriptBound(session);
+    if (userMessages.length > 0) session.chat_revision = normalizeRevision(session.chat_revision) + 1;
     if (restoring) {
       const restoredFailures = Array.isArray(payload.artifact_failures)
         ? JSON.parse(JSON.stringify(payload.artifact_failures))
@@ -337,7 +365,7 @@ export class SessionStore {
     if (shouldEndSession) session.ended_by = "user";
     session.updated_at = new Date().toISOString();
     await this.writeState(state);
-    return session;
+    return { ...session, fresh_feedback: !restoring && acceptedPrompts.length > 0 };
   }
 
   async issueReviewerHandoff(key) {
@@ -730,11 +758,11 @@ export class SessionStore {
       if (!session) {
         return null;
       }
-      session.chat = [
-        ...(session.chat || []),
-        { role: "agent", text: String(text || ""), at: new Date().toISOString() },
-      ];
-      session.updated_at = new Date().toISOString();
+      const at = new Date().toISOString();
+      session.chat = [...(session.chat || []), { role: "agent", text: String(text || ""), at }];
+      applyTranscriptBound(session);
+      session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+      session.updated_at = at;
       await this.writeState(state);
       return session;
     });
@@ -781,7 +809,15 @@ export class SessionStore {
     try {
       const raw = await readFile(this.file, "utf8");
       const parsed = JSON.parse(raw);
-      return { sessions: parsed.sessions || {} };
+      const state = { sessions: parsed.sessions || {} };
+      let changed = false;
+      for (const session of Object.values(state.sessions)) {
+        if (!session || typeof session !== "object" || !applyTranscriptBound(session)) continue;
+        session.chat_revision = normalizeRevision(session.chat_revision) + 1;
+        changed = true;
+      }
+      if (changed) await this.writeState(state);
+      return state;
     } catch (error) {
       if (error && error.code === "ENOENT") {
         return { sessions: {} };
@@ -804,6 +840,20 @@ export function sessionKey(file) {
   return crypto.createHash("sha256").update(file).digest("hex").slice(0, 16);
 }
 
+function applyTranscriptBound(session) {
+  const originalChat = Array.isArray(session.chat) ? session.chat : [];
+  const { chat, evicted } = boundStoredChat(session.chat);
+  const chatChanged =
+    !Array.isArray(session.chat) ||
+    chat.length !== originalChat.length ||
+    chat.some((entry, index) => entry !== originalChat[index]);
+  session.chat = chat;
+  if (evicted.length === 0) return chatChanged;
+  const existingAckCount = Array.isArray(session.chat_ack_ids) ? session.chat_ack_ids.length : 0;
+  session.chat_ack_ids = collectChatAckIds(evicted, session.chat_ack_ids);
+  return chatChanged || session.chat_ack_ids.length !== existingAckCount;
+}
+
 // Returns `{ prompt, malformed }`: `malformed` is non-empty when the payload's
 // `attachments` field exists but cannot be honored as written, which fails the
 // whole batch rather than being normalized away (C4, see queuePrompts).
@@ -820,51 +870,13 @@ function normalizePrompt(prompt) {
   // own transcript shows. The payload itself is unchanged: the agent still receives `prompt`.
   const summary = String(prompt.summary || "").slice(0, MAX_PROMPT_SUMMARY_CHARS);
   if (summary) normalized.summary = summary;
+  const promptId = normalizePromptId(prompt.prompt_id);
+  if (promptId) normalized.prompt_id = promptId;
   const target = normalizeTarget(prompt.target);
   if (target) normalized.target = target;
   const { refs, malformed } = normalizeAttachmentRefs(prompt.attachments);
   if (refs.length > 0) normalized.attachments = refs;
   return { prompt: normalized, malformed };
-}
-
-// Everything a reviewer sends belongs in the transcript, not only what they typed.
-// The Conversation panel stacks queued pills and chat bubbles in one scroll region
-// under one heading, and a successful send clears the pills - so a prompt that never
-// becomes a bubble is erased from the only place the reviewer could see it, and the
-// server keeps no record of it either. Element, text and image annotations, whiteboard
-// feedback and queued layout fixes are the primary way this tool is used; they are as
-// much the conversation as a typed message is.
-//
-// An image-only prompt carries no text of its own, so it gets the same placeholder the
-// browser shows on its pill rather than being dropped for having nothing to display.
-function chatEntryForPrompt(prompt) {
-  const isMessage = prompt.tag === "message";
-  const attachments = Array.isArray(prompt.attachments) ? prompt.attachments.length : 0;
-  const text =
-    String(prompt.summary || "") ||
-    String(prompt.prompt || "") ||
-    (attachments ? (isMessage ? "Image message" : "Image annotation") : "");
-  if (!text) return null;
-  const entry = { role: "user", text, at: new Date().toISOString() };
-  const target = chatTargetLabel(prompt);
-  if (target) entry.target = target;
-  if (!isMessage && prompt.tag) entry.tag = String(prompt.tag);
-  return entry;
-}
-
-// What the bubble says the feedback was about, mirroring the queued pill's tooltip: a
-// table cell's visible row and column names when it has them, the CSS locator
-// otherwise, and for the targetless kinds - layout fixes, whiteboard edits - the short
-// label the browser already wrote for them.
-function chatTargetLabel(prompt) {
-  if (prompt.tag === "message") return "";
-  if (prompt.target?.type === "table-cell") {
-    const semantic = [prompt.target.rowLabel, prompt.target.columnLabel].filter(Boolean).join(" \u2192 ");
-    if (semantic) return semantic;
-  }
-  // `text` is what the page calls this target - the selected text, or a label it wrote itself
-  // ("C004 · rejected · §1"). A CSS locator is what is left when nothing said it in words.
-  return String(prompt.text || prompt.selector || "");
 }
 
 // Appends one delivery to the retained history, newest last, then drops whole
@@ -901,6 +913,15 @@ function retainDeliveredPrompts(existing, prompts, deliveredAt) {
     bytes -= dropped.entries.reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry)), 0);
   }
   return groups.flatMap((group) => group.entries);
+}
+
+// Settlement identity is transcript-owned. The agent-facing prompt list must not carry it:
+// poll output stays the reviewer's words, and a restore replay never re-appends chat.
+function agentFacingPrompt(prompt) {
+  if (!prompt || typeof prompt !== "object" || prompt.prompt_id === undefined) return prompt;
+  const rest = { ...prompt };
+  delete rest.prompt_id;
+  return rest;
 }
 
 function layoutWarningPromptIds(prompt) {

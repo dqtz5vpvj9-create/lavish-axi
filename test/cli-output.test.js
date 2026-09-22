@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -34,7 +35,9 @@ import {
   detectInvokingAgent,
   fetchJson,
   getCommandHelp,
+  herdrPollChimeEnabled,
   normalizeArgv,
+  notifyHerdrPollReady,
   parseHistoryLimit,
   parseHistorySince,
   resolveShareRequest,
@@ -43,7 +46,6 @@ import {
   pollWaitTickText,
   resolveCopilotHookDir,
   resolveHookHomeDir,
-  resolveServerEntry,
   serverReplacementReason,
   shareCommand,
   shutdownServerOnPort,
@@ -193,9 +195,10 @@ test("design output is the sole emitted concise explicit-background guidance", (
     JSON.stringify(createHomeOutput({ bin: "lavish-axi", sessions: [] })),
     getCommandHelp("design"),
     createSkillMarkdown(),
-    ...["table", "comparison", "plan", "code", "input", "slides"].map((id) =>
-      JSON.stringify(createPlaybookOutput([id])),
-    ),
+    ...createPlaybookOutput([])
+      .playbooks.map((playbook) => playbook.id)
+      .filter((id) => id !== "diagram")
+      .map((id) => JSON.stringify(createPlaybookOutput([id]))),
   ];
   for (const surface of otherAgentSurfaces) {
     assert.ok(!surface.includes(instruction));
@@ -335,7 +338,7 @@ test("top-level help renders static home output without dynamic sessions", async
     );
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /playbooks\[7\]/);
+    assert.match(result.stdout, /playbooks\[8\]/);
     assert.match(result.stdout, /lavish-axi playbook <playbook_id>/);
     assert.match(result.stdout, /reference other filesystem assets/);
     assert.match(result.stdout, /same directory as the HTML file/);
@@ -357,7 +360,7 @@ test("design output prints copy-pasteable CDN URLs so agents can opt in to Daisy
   const output = createDesignOutput();
 
   assert.match(output.playbook_router.instruction, /MUST open each matching playbook before writing HTML/);
-  assert.equal(output.playbook_router.playbooks.length, 7);
+  assert.equal(output.playbook_router.playbooks.length, 8);
   assert.equal(
     output.playbook_router.playbooks.find((playbook) => playbook.id === "diagram")?.use_when,
     "Explain relationships, flows, state, architecture, and concepts with illustrations",
@@ -426,10 +429,10 @@ test("design output recommends luxury as the default theme and warns against @ap
 test("playbook index output lists known playbooks with concise descriptions", () => {
   const output = createPlaybookOutput([]);
 
-  assert.equal(output.playbooks.length, 7);
+  assert.equal(output.playbooks.length, 8);
   assert.deepEqual(
     output.playbooks.map((playbook) => playbook.id),
-    ["diagram", "table", "comparison", "plan", "code", "input", "slides"],
+    ["diagram", "table", "comparison", "plan", "code", "input", "explanation", "slides"],
   );
   assert.equal(
     output.playbooks.find((playbook) => playbook.id === "plan")?.use_when,
@@ -443,6 +446,24 @@ test("playbook index output lists known playbooks with concise descriptions", ()
   assert.ok(output.help.some((item) => item.includes("lavish-axi playbook <playbook_id>")));
   assert.ok(output.help.some((item) => item.includes("combines several playbooks")));
   assert.ok(output.help.some((item) => item.includes("MUST open each matching playbook")));
+});
+
+test("explanation playbook routes understanding of existing things and separates itself from plan and comparison", () => {
+  const output = createPlaybookOutput(["explanation"]);
+
+  assert.match(output.playbook.use_when, /Explain an existing system, PR, incident, or decision/i);
+  assert.match(output.playbook.use_when, /not choosing a direction or inspecting a plan/);
+  assert.ok(
+    output.playbook.choose.some((item) => /plan playbook when the reader must inspect and approve/i.test(item)),
+  );
+  assert.ok(output.playbook.structure.some((item) => /one-sentence answer/i.test(item)));
+  assert.ok(output.playbook.structure.some((item) => /what was deliberately left out/i.test(item)));
+  assert.ok(output.playbook.pitfalls.some((item) => /restate the PR body, diff, or ticket file-by-file/i.test(item)));
+  assert.ok(
+    output.playbook.design_rules.some((item) => /diagram playbook's assume-nothing rule/i.test(item)),
+    "reader starting point is owned by the diagram playbook and only pointed at here",
+  );
+  assert.ok(output.playbook.pitfalls.some((item) => /inferred reasoning as verified fact/i.test(item)));
 });
 
 test("diagram playbook defaults to hand-authored SVG and names the anti-patterns", () => {
@@ -466,14 +487,17 @@ test("diagram playbook owns assume-nothing and one-concept-per-diagram guidance"
     "the diagram playbook must prefer one concept per diagram",
   );
 
+  const playbookIds = createPlaybookOutput([]).playbooks.map((playbook) => playbook.id);
   const otherSurfaces = [
     JSON.stringify(createHomeOutput({ bin: "lavish-axi", sessions: [] })),
     JSON.stringify(createDesignOutput()),
     createSkillMarkdown(),
+    ...playbookIds.filter((id) => id !== "diagram").map((id) => JSON.stringify(createPlaybookOutput([id]).playbook)),
   ];
   for (const surface of otherSurfaces) {
     assert.doesNotMatch(surface, /one concept per diagram/i);
     assert.doesNotMatch(surface, /knows nothing/i);
+    assert.doesNotMatch(surface, /presume/i);
   }
 
   const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-playbook-diagram-`);
@@ -2144,6 +2168,122 @@ test("poll wait messages tell watching agents the silence is normal", () => {
   assert.match(interrupted, /feedback remains queued until delivery/);
 });
 
+test("Herdr poll chime is disabled unless both Lavish and Herdr opt in", () => {
+  assert.equal(herdrPollChimeEnabled({}), false);
+  assert.equal(herdrPollChimeEnabled({ HERDR_ENV: "1" }), false);
+  assert.equal(herdrPollChimeEnabled({ LAVISH_AXI_HERDR_CHIME: "1" }), false);
+  assert.equal(herdrPollChimeEnabled({ HERDR_ENV: "1", LAVISH_AXI_HERDR_CHIME: "0" }), false);
+  assert.equal(herdrPollChimeEnabled({ HERDR_ENV: "1", LAVISH_AXI_HERDR_CHIME: "1" }), true);
+});
+
+test("Herdr poll chime requests attention without making notification failure fatal", async () => {
+  const calls = [];
+  /** @type {import("node:child_process").ChildProcess | undefined} */
+  let child;
+  const notified = notifyHerdrPollReady({
+    env: { HERDR_ENV: "1", LAVISH_AXI_HERDR_CHIME: "1" },
+    runner(command, args, options) {
+      calls.push({ command, args, options });
+      child = spawn(process.execPath, ["-e", "process.exit(0)"], options);
+      return child;
+    },
+  });
+
+  assert.equal(notified, true);
+  assert.ok(child);
+  child.ref();
+  await once(child, "close");
+  assert.deepEqual(calls, [
+    {
+      command: "herdr",
+      args: [
+        "notification",
+        "show",
+        "Lavish review ready",
+        "--body",
+        "The artifact is open and Lavish is polling for your feedback.",
+        "--sound",
+        "request",
+      ],
+      options: { stdio: "ignore" },
+    },
+  ]);
+
+  assert.equal(
+    notifyHerdrPollReady({
+      env: { HERDR_ENV: "1", LAVISH_AXI_HERDR_CHIME: "1" },
+      runner() {
+        throw new Error("Herdr unavailable");
+      },
+    }),
+    false,
+  );
+});
+
+test("Herdr failures and a stalled notification do not delay poll feedback", { timeout: 10_000 }, async (t) => {
+  const server = createServer((_req, res) => {
+    res.setHeader("Lavish-Poll-State", "listening");
+    res.end(JSON.stringify({ status: "feedback", prompts: [{ text: "Review this" }] }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const env = { HERDR_ENV: "1", LAVISH_AXI_HERDR_CHIME: "1" };
+
+  for (const behavior of ["missing", "rejected", "stalled"]) {
+    await t.test(behavior, async () => {
+      const exitListeners = process.listenerCount("exit");
+      /** @type {import("node:child_process").ChildProcess | undefined} */
+      let child;
+      /** @type {Promise<{ code: number | null, signal: NodeJS.Signals | null }> | undefined} */
+      let closed;
+      const response = await fetchJson(`http://127.0.0.1:${address.port}`, {
+        onResponse() {
+          notifyHerdrPollReady({
+            env,
+            runner(_command, _args, options) {
+              child =
+                behavior === "missing"
+                  ? spawn(path.join(process.cwd(), "missing-herdr-executable"), [], options)
+                  : spawn(
+                      process.execPath,
+                      [
+                        "-e",
+                        behavior === "rejected"
+                          ? "process.exit(1)"
+                          : "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+                      ],
+                      options,
+                    );
+              closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+              return child;
+            },
+          });
+        },
+      });
+      try {
+        assert.ok(child);
+        assert.ok(closed);
+        assert.deepEqual(response, { status: "feedback", prompts: [{ text: "Review this" }] });
+        if (behavior === "stalled") {
+          assert.equal(child.exitCode, null);
+          assert.equal(child.signalCode, null);
+          const result = await closed;
+          if (process.platform !== "win32") assert.equal(result.signal, "SIGKILL");
+          assert.ok(child.killed);
+        } else {
+          await closed;
+        }
+        assert.equal(process.listenerCount("exit"), exitListeners);
+      } finally {
+        child?.kill("SIGKILL");
+      }
+    });
+  }
+});
+
 test("poll wait reporter writes a banner immediately and heartbeats on an interval", async () => {
   const lines = [];
   const reporter = startPollWaitReporter({
@@ -2759,15 +2899,11 @@ test("server spawn options can persist detached server output to a log fd", () =
   assert.deepEqual(options.stdio, ["ignore", 17, 17]);
 });
 
-test("server entry resolves to a node-executable script that actually invokes run()", () => {
-  // Running from source, the entry must be `bin/lavish-axi.js` (the only file in the
-  // source tree that calls run() on import). In the published bundle only `dist/cli.mjs`
-  // ships - it embeds the bin wrapper so it self-invokes. Either way, spawning the entry
-  // with `node <entry> server` must boot the server, not silently load the module and exit.
-  const entry = resolveServerEntry();
-  assert.ok(existsSync(entry), `server entry must exist on disk, got: ${entry}`);
-  // From source: bin/lavish-axi.js is present and preferred.
-  assert.equal(entry, fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)));
+test("detached server entry dispatches the CLI", () => {
+  const entry = fileURLToPath(new URL("../bin/lavish-axi-server.js", import.meta.url));
+  const result = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /\d+\.\d+\.\d+/);
 });
 
 test("local built CLI opens force a server restart while source and installed runs do not", () => {

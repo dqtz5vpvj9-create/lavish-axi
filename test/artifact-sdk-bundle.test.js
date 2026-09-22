@@ -104,7 +104,7 @@ function cell(tag, text) {
   return element;
 }
 
-function bootSdk({ runAnimationFrames = false } = {}) {
+function bootSdk({ runAnimationFrames = false, revisionsScript = null, revisionMarkElements = [] } = {}) {
   const posted = [];
   const scrolls = [];
   const documentListeners = [];
@@ -122,6 +122,7 @@ function bootSdk({ runAnimationFrames = false } = {}) {
   const body = createElement("body");
   appendTo(documentElement, head);
   appendTo(documentElement, body);
+  for (const element of revisionMarkElements) appendTo(body, element);
 
   const sandbox = {
     parent: { postMessage: (message) => posted.push(message) },
@@ -157,8 +158,9 @@ function bootSdk({ runAnimationFrames = false } = {}) {
       removeEventListener() {},
       createElement,
       getElementById: () => null,
-      querySelector: (selector) => documentQuery(selector),
-      querySelectorAll: () => [],
+      querySelector: (selector) =>
+        selector === "script[data-lavish-revisions]" ? revisionsScript : documentQuery(selector),
+      querySelectorAll: (selector) => (selector === "[data-lavish-revision]" ? revisionMarkElements : []),
       getSelection: () => null,
     },
   };
@@ -275,6 +277,43 @@ test("a requested layout diagnostic publishes even when the result is unchanged"
   assert.equal(diagnostics.length, 2);
   assert.equal(diagnostics[1].artifact_pass_sequence, diagnostics[0].artifact_pass_sequence + 1);
   assert.deepEqual(diagnostics[1].findings, diagnostics[0].findings);
+});
+
+test("the served SDK echoes the snapshot request id", () => {
+  const sdk = bootSdk();
+
+  sdk.sendChromeMessage({ type: "lavish:requestSnapshot", snapshot_request_id: "snapshot-17" });
+
+  const response = sdk.posted.at(-1);
+  assert.equal(response.type, "lavish:snapshot");
+  assert.equal(response.snapshot_request_id, "snapshot-17");
+  assert.equal(response.artifact_load_token, "load-token");
+});
+
+// readArtifactRevisions calls parseRevisionRegistry and collectRevisionMarks, which in turn call
+// the rest of the revision helper chain; a helper left out of the bundle only ReferenceErrors on
+// this real read, which a source-grep over the bundle text cannot catch.
+test("the served SDK bundle reports the artifact's own revision registry and marks", () => {
+  const revisionsScript = createElement("script");
+  revisionsScript.textContent = JSON.stringify([
+    { id: "r1", label: "Tightened header copy", summary: "Shortened the hero headline" },
+  ]);
+  const marked = createElement("h1");
+  marked.setAttribute("data-lavish-revision", "r1");
+  marked.textContent = "Ship faster";
+
+  const sdk = bootSdk({ revisionsScript, revisionMarkElements: [marked] });
+
+  const message = sdk.posted.find((entry) => entry.type === "lavish:revisions");
+  assert.ok(message, "the SDK reports the revision registry on load");
+  assert.equal(message.revisions.length, 1);
+  assert.equal(message.revisions[0].id, "r1");
+  assert.equal(message.revisions[0].label, "Tightened header copy");
+  assert.equal(message.revisions[0].mark_count, 1);
+  assert.equal(message.marks.length, 1);
+  assert.equal(message.marks[0].revision_id, "r1");
+  assert.equal(message.marks[0].selector, "html > body > h1");
+  assert.equal(message.marks[0].excerpt, "Ship faster");
 });
 
 test("the served SDK bundle queues a table-cell annotation without a missing-helper ReferenceError", () => {
