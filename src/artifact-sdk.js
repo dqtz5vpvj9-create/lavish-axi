@@ -1265,6 +1265,25 @@ export function createArtifactSdk(
   let lastLayoutAuditSignature = null;
   let layoutAuditPublishRequested = false;
   let layoutAuditPassSequence = 0;
+  // Every DOM mutation since the SDK booted. The settled signal below uses it to tell a quiet
+  // document from one still hydrating without serialising yet another quiet window, and the
+  // audit uses it to skip a final pass that could only repeat the previous one.
+  let lastDomMutationAt = 0;
+  let domMutationCount = 0;
+
+  function watchDomMutations() {
+    if (typeof MutationObserver === "undefined" || !document.documentElement) return;
+    const observer = new MutationObserver(() => {
+      lastDomMutationAt = Date.now();
+      domMutationCount += 1;
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
 
   function toPixelNumber(value) {
     const parsed = Number.parseFloat(String(value || "0"));
@@ -1450,14 +1469,41 @@ export function createArtifactSdk(
     return Boolean(el?.closest?.(".mermaid,svg,[data-lavish-ui]"));
   }
 
-  function hasVisualMaskAncestor(el) {
+  // One audit pass asks the same ancestor questions of every element it visits, so a deeply
+  // nested document pays for each ancestor chain over and over. Nothing changes inside a
+  // synchronous pass, so the answers are cached per element for its duration.
+  let auditAncestorCache = null;
+
+  function hasAncestorMatching(el, kind, matches) {
+    let cache = auditAncestorCache?.get(kind);
+    if (auditAncestorCache && !cache) {
+      cache = new Map();
+      auditAncestorCache.set(kind, cache);
+    }
+    const chain = [];
+    let result = false;
     let node = el;
     while (node && node.nodeType === 1) {
-      const style = getComputedStyle(node);
-      if (hasVisualMask(style) || isRoundedOverflowMask(style)) return true;
+      if (cache?.has(node)) {
+        result = cache.get(node);
+        break;
+      }
+      chain.push(node);
+      if (matches(node)) {
+        result = true;
+        break;
+      }
       node = node.parentElement;
     }
-    return false;
+    if (cache) for (const visited of chain) cache.set(visited, result);
+    return result;
+  }
+
+  function hasVisualMaskAncestor(el) {
+    return hasAncestorMatching(el, "mask", (node) => {
+      const style = getComputedStyle(node);
+      return hasVisualMask(style) || isRoundedOverflowMask(style);
+    });
   }
 
   function clippingBoundariesFor(el) {
@@ -1486,13 +1532,9 @@ export function createArtifactSdk(
   }
 
   function hasStandardVisuallyHiddenAncestor(el) {
-    let node = el;
-    while (node && node.nodeType === 1) {
-      const rect = node.getBoundingClientRect();
-      if (isStandardVisuallyHidden(node, getComputedStyle(node), rect)) return true;
-      node = node.parentElement;
-    }
-    return false;
+    return hasAncestorMatching(el, "hidden", (node) =>
+      isStandardVisuallyHidden(node, getComputedStyle(node), node.getBoundingClientRect()),
+    );
   }
 
   function isExcludedLayoutAuditElement(el) {
@@ -1799,6 +1841,15 @@ export function createArtifactSdk(
   }
 
   function auditLayout() {
+    auditAncestorCache = new Map();
+    try {
+      return auditLayoutPass();
+    } finally {
+      auditAncestorCache = null;
+    }
+  }
+
+  function auditLayoutPass() {
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
     const findings = [];
     const seen = new Set();
@@ -2002,20 +2053,36 @@ export function createArtifactSdk(
     await waitForAnimationFrames(2);
     if (runId !== layoutAuditRun) return;
 
+    // Fonts are in, sizes have stopped moving and finite animations are done: the geometry the
+    // chrome's gate waits for is final. Release it here rather than after the stability samples
+    // below, which exist to filter flapping findings and cost whole audit passes on a large
+    // document. A document still hydrating keeps the gate on the diagnostics pass instead.
+    reapplyScrollRestore();
+    if (
+      animationsSettled &&
+      document.readyState === "complete" &&
+      Date.now() - lastDomMutationAt >= layoutAuditSettleMs
+    ) {
+      postArtifactMessage("lavish:layoutSettled", { artifact_revision: artifactRevision });
+    }
+
     const first = auditLayout();
     await new Promise((resolve) => window.setTimeout(resolve, layoutAuditStableSampleMs));
     await waitForAnimationFrames(2);
     if (runId !== layoutAuditRun) return;
     const second = auditLayout();
+    const mutationsBeforeQuiet = domMutationCount;
     const domHydrationQuiescent = await waitForDomHydrationQuiescence();
     if (runId !== layoutAuditRun) return;
-    const final = domHydrationQuiescent ? auditLayout() : second;
+    // A quiet window that saw no mutation at all leaves nothing for a third pass to re-check.
+    const final = domHydrationQuiescent && domMutationCount !== mutationsBeforeQuiet ? auditLayout() : second;
     const targetPresenceComplete = document.readyState === "complete" && domHydrationQuiescent;
     publishLayoutAudit(
       findStableLayoutFindings(domHydrationQuiescent ? second : first, final),
       animationsSettled && targetPresenceComplete,
       targetPresenceComplete,
     );
+    reapplyScrollRestore();
   }
 
   function scheduleLayoutAudit(publishRequested = false) {
@@ -2469,7 +2536,8 @@ export function createArtifactSdk(
       postArtifactMessage("lavish:snapshot", { snapshot: snapshot() });
     }
     if (msg.type === "lavish:restoreScroll") {
-      window.scrollTo(Number(msg.x) || 0, Number(msg.y) || 0);
+      pendingScrollRestore = { x: Number(msg.x) || 0, y: Number(msg.y) || 0, anchor: msg.anchor };
+      applyScrollRestore(pendingScrollRestore);
     }
     if (msg.type === "lavish:restoreReviewState") restoreReviewState(msg.state);
     if (msg.type === "lavish:revealElement") revealElement(msg.selector);
@@ -2508,8 +2576,13 @@ export function createArtifactSdk(
     true,
   );
 
-  // Report scroll position to the chrome so it can be restored across hot reloads.
-  // The iframe is sandboxed without same-origin, so the chrome can't read scrollY directly.
+  // Report scroll position to the chrome so it can be restored across hot reloads and browser
+  // reloads. The iframe is sandboxed without same-origin, so the chrome can't read scrollY
+  // directly. A pixel offset alone is only right while everything above it keeps its height;
+  // stacked annotation columns, sections opened from stored state, or a font arriving late all
+  // move the content under a fixed pixel. So the report also names the element at the top of the
+  // viewport and where its top sat, and the restore aligns that element the way the browser's own
+  // scroll anchoring would.
   let scrollFrame = 0;
   window.addEventListener(
     "scroll",
@@ -2517,11 +2590,87 @@ export function createArtifactSdk(
       if (scrollFrame) return;
       scrollFrame = window.requestAnimationFrame(() => {
         scrollFrame = 0;
-        postArtifactMessage("lavish:scroll", { x: window.scrollX, y: window.scrollY });
+        postArtifactMessage("lavish:scroll", { x: window.scrollX, y: window.scrollY, anchor: scrollAnchor() });
       });
     },
     { passive: true },
   );
+
+  function anchorFingerprint(el) {
+    return String(el.textContent || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .slice(0, 80);
+  }
+
+  // The outermost fixed or sticky ancestor, if any: a bar pinned to the viewport says nothing
+  // about where the reader is in the document.
+  function pinnedViewportRoot(el) {
+    let pinned = null;
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.body) {
+      const position = getComputedStyle(node).position;
+      if (position === "fixed" || position === "sticky") pinned = node;
+      node = node.parentElement;
+    }
+    return pinned;
+  }
+
+  function scrollAnchor() {
+    if (typeof document.elementFromPoint !== "function") return null;
+    const width = window.innerWidth || 0;
+    const height = window.innerHeight || 0;
+    for (const fraction of [0.5, 0.25, 0.75]) {
+      let y = 2;
+      for (let hop = 0; hop < 6 && y < height; hop += 1) {
+        const el = document.elementFromPoint(Math.floor(width * fraction), y);
+        if (!el) break;
+        if (el === document.body || el === document.documentElement || isLavishUi(el)) {
+          y += 40;
+          continue;
+        }
+        const pinned = pinnedViewportRoot(el);
+        if (pinned) {
+          // Probe just below the pinned bar instead of giving up on this column.
+          y = Math.max(y + 1, pinned.getBoundingClientRect().bottom + 2);
+          continue;
+        }
+        return { selector: selector(el), top: el.getBoundingClientRect().top, text: anchorFingerprint(el) };
+      }
+    }
+    return null;
+  }
+
+  // The chrome replays the last position when the frame loads. That is before fonts, stored
+  // state and late layout have had their say, so the same alignment is applied again when the
+  // geometry settles and when the audit finishes - until the reader takes over the scrolling.
+  let pendingScrollRestore = null;
+
+  function applyScrollRestore(restore) {
+    if (!restore) return;
+    window.scrollTo(restore.x, restore.y);
+    const anchor = restore.anchor;
+    if (!anchor || typeof anchor.selector !== "string" || !anchor.selector) return;
+    const el = safeQuerySelector(anchor.selector);
+    if (!el || typeof el.getBoundingClientRect !== "function" || isLavishUi(el)) return;
+    if (anchor.text && anchorFingerprint(el) !== anchor.text) return;
+    const delta = el.getBoundingClientRect().top - (Number(anchor.top) || 0);
+    if (Math.abs(delta) >= 1) window.scrollBy(0, delta);
+  }
+
+  function reapplyScrollRestore() {
+    if (pendingScrollRestore) applyScrollRestore(pendingScrollRestore);
+  }
+
+  for (const type of ["wheel", "touchstart", "keydown", "pointerdown"]) {
+    window.addEventListener(
+      type,
+      () => {
+        pendingScrollRestore = null;
+      },
+      { passive: true, capture: true },
+    );
+  }
 
   document.addEventListener(
     "mouseover",
@@ -2595,6 +2744,7 @@ export function createArtifactSdk(
   );
 
   setAnnotationMode(annotationMode);
+  watchDomMutations();
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", startLayoutAudit, { once: true });
   } else {
