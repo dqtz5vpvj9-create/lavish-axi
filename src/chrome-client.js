@@ -224,7 +224,33 @@ let submitQueuedPromise = null;
 let submitQueuedAgain = false;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let sendAcknowledgementTimer;
-let lastScroll = { x: 0, y: 0 };
+// The artifact's scroll position outlives the artifact document: a hot reload swaps the frame and
+// a browser reload (Ctrl+R) swaps this page too, and neither should send the reader back to the
+// top. The frame's URL carries a fresh load token each time, so the browser's own scroll
+// restoration never applies to it; the position is kept per tab here instead.
+const scrollStorageKey = "lavish-axi:scroll:" + key;
+let lastScroll = loadStoredScroll();
+
+function loadStoredScroll() {
+  return sanitizeScroll(loadJsonState(scrollStorageKey, null));
+}
+
+// The artifact reports the position, so its shape is checked here before it is stored or replayed.
+function sanitizeScroll(reported) {
+  const anchor = reported?.anchor;
+  const selector = typeof anchor?.selector === "string" ? anchor.selector.slice(0, 500) : "";
+  return {
+    x: Number(reported?.x) || 0,
+    y: Number(reported?.y) || 0,
+    anchor: selector
+      ? {
+          selector,
+          top: Number(anchor.top) || 0,
+          text: typeof anchor.text === "string" ? anchor.text.slice(0, 80) : "",
+        }
+      : null,
+  };
+}
 // In-iframe review context (an open annotation card's unsent text, Lavish-owned question
 // answers). The sandbox means the chrome cannot read it back after a reload, so the SDK reports
 // it as it changes and the chrome replays it once the new document is up. It is persisted per
@@ -1494,6 +1520,7 @@ function setLayoutGateCard(state) {
     return;
   }
 
+  layoutGateOverlay?.classList?.remove("layout-gate-urgent");
   layoutGateTitle.innerHTML = "Checking layout.<br>One moment.";
   layoutGateCopy.textContent = "Lavish is waiting for fonts and final geometry before revealing this artifact.";
 }
@@ -1522,6 +1549,8 @@ function setLayoutGateFailure(title, copy, actionLabel = "Reload", onAction, { s
   // Failure copy must not disable the visual gate's own recovery paths. Keep a fresh hold timer
   // over the card so a server replacement or any other failure cannot strand the artifact behind
   // a sticky message forever.
+  // A failure is news the user needs now; the checking card's grace period does not apply.
+  layoutGateOverlay?.classList?.add("layout-gate-urgent");
   if (layoutGateTitle) layoutGateTitle.textContent = title;
   if (layoutGateCopy) layoutGateCopy.textContent = copy;
   if (layoutGateAction) {
@@ -3116,6 +3145,11 @@ window.addEventListener("message", (event) => {
   const messageSequence = ++artifactMessageSequence;
   artifactSpokeToken = messageToken;
   clearTimeout(artifactSilenceTimer);
+  if (msg.type === "lavish:layoutSettled") {
+    // Fonts and final geometry are in. The findings pass that follows feeds the inbox, not the gate.
+    handleLayoutGatePass();
+    return;
+  }
   if (msg.type === "lavish:layoutDiagnostics") {
     const diagnosticSequence = ++layoutDiagnosticSequence;
     const complete = msg.complete !== false;
@@ -3168,7 +3202,8 @@ window.addEventListener("message", (event) => {
     }
   }
   if (msg.type === "lavish:scroll") {
-    lastScroll = { x: Number(msg.x) || 0, y: Number(msg.y) || 0 };
+    lastScroll = sanitizeScroll(msg);
+    saveJsonState(scrollStorageKey, lastScroll);
   }
   if (msg.type === "lavish:reviewState") {
     setReviewState(msg.state && typeof msg.state === "object" ? msg.state : null);
@@ -3554,7 +3589,12 @@ frame.addEventListener("load", () => {
   if (artifactSpokeToken !== artifactLoadToken) armArtifactAvailabilityProbe(artifactLoadToken);
   postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation && !ended });
   // Replay the pre-reload scroll position so hot reloads don't jump the artifact to the top.
-  postToFrame({ type: "lavish:restoreScroll", x: lastScroll.x, y: lastScroll.y });
+  postToFrame({
+    type: "lavish:restoreScroll",
+    x: lastScroll.x,
+    y: lastScroll.y,
+    ...(lastScroll.anchor ? { anchor: lastScroll.anchor } : {}),
+  });
   if (lastReviewState) postToFrame({ type: "lavish:restoreReviewState", state: lastReviewState });
   if (overlayIndex !== null) {
     inlineWhiteboardChannels.delete(overlayIndex);

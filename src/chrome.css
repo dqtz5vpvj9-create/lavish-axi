@@ -1488,6 +1488,23 @@ body.panel-collapsed .panel-restore {
 .ended-overlay[hidden] {
   display: none;
 }
+/* A healthy load lifts the gate within a second or so, and a card that flashes for that long on
+   every reload reads as a fault. The overlay stays transparent through a short grace period and
+   only then shows the checking card; a failure card marks itself urgent and skips the wait. The
+   animation restarts each time the overlay comes out of [hidden], so every gate cycle gets it. */
+.layout-gate-overlay {
+  opacity: 0;
+  animation: layout-gate-appear 0s linear 2000ms forwards;
+}
+.layout-gate-overlay.layout-gate-urgent {
+  animation: none;
+  opacity: 1;
+}
+@keyframes layout-gate-appear {
+  to {
+    opacity: 1;
+  }
+}
 .ended-card {
   width: min(360px, calc(100vw - 48px));
   border: 1px solid var(--border);

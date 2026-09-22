@@ -106,6 +106,7 @@ function cell(tag, text) {
 
 function bootSdk({ runAnimationFrames = false } = {}) {
   const posted = [];
+  const scrolls = [];
   const documentListeners = [];
   // Deferred work the SDK schedules, run only when a test asks for it: the draft-anchor settle
   // re-query is a real timer, and asserting on it means running it rather than assuming it.
@@ -172,6 +173,12 @@ function bootSdk({ runAnimationFrames = false } = {}) {
     innerHeight: 800,
     scrollX: 0,
     scrollY: 0,
+    scrollTo(x, y) {
+      scrolls.push({ to: [x, y] });
+    },
+    scrollBy(x, y) {
+      scrolls.push({ by: [x, y] });
+    },
     location: { origin: "http://127.0.0.1" },
     URL: sandbox.URL,
   };
@@ -181,6 +188,7 @@ function bootSdk({ runAnimationFrames = false } = {}) {
 
   return {
     posted,
+    scrolls,
     body,
     api: sandbox.window.lavish,
     click(target) {
@@ -523,4 +531,53 @@ test("the served SDK bundle drops a late restore once the user has opened a card
     sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
     false,
   );
+});
+
+test("the SDK signals settled geometry before it finishes the diagnostics pass", async () => {
+  const sdk = bootSdk({ runAnimationFrames: true });
+
+  await sdk.runAllTimers();
+  const sequence = sdk.posted
+    .map((message) => message.type)
+    .filter((type) => type === "lavish:layoutSettled" || type === "lavish:layoutDiagnostics");
+  assert.deepEqual(sequence, ["lavish:layoutSettled", "lavish:layoutDiagnostics"]);
+  const settled = sdk.posted.find((message) => message.type === "lavish:layoutSettled");
+  const diagnostics = sdk.posted.find((message) => message.type === "lavish:layoutDiagnostics");
+  assert.equal(settled.artifact_load_token, diagnostics.artifact_load_token);
+});
+
+test("a restored scroll position re-aligns its anchor element after the pixel offset", async () => {
+  const sdk = bootSdk({ runAnimationFrames: true });
+  const paragraph = createElement("p");
+  paragraph.textContent = "The paragraph that sat at the top of the viewport";
+  // Content above it grew by 500px since the position was recorded.
+  paragraph.getBoundingClientRect = () => ({ top: 482, left: 0, right: 600, bottom: 520, width: 600, height: 38 });
+  sdk.setDocumentQuery((selector) => (selector === "main > p:nth-of-type(4)" ? paragraph : null));
+
+  sdk.sendChromeMessage({
+    type: "lavish:restoreScroll",
+    x: 0,
+    y: 3000,
+    anchor: {
+      selector: "main > p:nth-of-type(4)",
+      top: -18,
+      text: "The paragraph that sat at the top of the viewport",
+    },
+  });
+  assert.deepEqual(sdk.scrolls, [{ to: [0, 3000] }, { by: [0, 500] }]);
+
+  // An element whose text no longer matches is not the same anchor; the pixel offset stands alone.
+  sdk.scrolls.length = 0;
+  sdk.sendChromeMessage({
+    type: "lavish:restoreScroll",
+    x: 0,
+    y: 3000,
+    anchor: { selector: "main > p:nth-of-type(4)", top: -18, text: "Something else entirely" },
+  });
+  assert.deepEqual(sdk.scrolls, [{ to: [0, 3000] }]);
+
+  // The settled geometry re-applies the alignment once more, before the gate lifts.
+  sdk.scrolls.length = 0;
+  await sdk.runAllTimers();
+  assert.equal(sdk.scrolls.filter((entry) => entry.to).length >= 1, true);
 });

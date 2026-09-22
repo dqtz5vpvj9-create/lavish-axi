@@ -2657,6 +2657,26 @@ test("the layout gate reveals after a completed pass with no findings", async ()
   assert.deepEqual(posts[0].body.findings, []);
 });
 
+test("the layout gate reveals on the artifact's settled signal, before any diagnostics pass", async () => {
+  const { posts, fetchImpl } = diagnosticsHarness([[]]);
+  const chrome = await createChromeHarness({ fetchImpl });
+
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  // A signal stamped by a load that lost the token race belongs to a frame that is gone.
+  chrome.sendFrameMessage({ type: "lavish:layoutSettled", artifact_load_token: "stale-load" });
+  await flushPromises();
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.sendFrameMessage({ type: "lavish:layoutSettled", artifact_load_token: chrome.artifactLoadToken() });
+  await flushPromises();
+
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+  assert.equal(chrome.element("body").classList.contains("layout-gate-active"), false);
+  // The reveal is a client-side signal; nothing was reported yet.
+  assert.equal(posts.filter((post) => post.url === "/api/abc/layout-diagnostics").length, 0);
+});
+
 // The gate used to hold the artifact hostage until an agent repaired the finding. Triage is the
 // user's now, so a completed pass always reveals and hands the result to the inbox.
 test("the layout gate reveals on severe findings and points at the inbox instead of holding", async () => {
@@ -5771,4 +5791,34 @@ test("crossing the breakpoint in either direction leaves no sheet state behind",
   assert.equal(state.scrollInert, true);
   assert.equal(chrome.focusLog.at(-1), "panelToggle");
   assert.equal(chrome.storage.has("lavish-axi:sheet-open:abc"), false);
+});
+
+test("the artifact's scroll position survives a browser reload of the chrome page", async () => {
+  const first = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  first.sendFrameMessage({
+    artifact_load_token: first.artifactLoadToken(),
+    type: "lavish:scroll",
+    x: 12,
+    y: 2480,
+    anchor: { selector: "section#s3 > p:nth-of-type(2)", top: -18.5, text: "Second paragraph", junk: true },
+  });
+  await flushPromises();
+  assert.deepEqual(JSON.parse(first.storage.get("lavish-axi:scroll:abc")), {
+    x: 12,
+    y: 2480,
+    anchor: { selector: "section#s3 > p:nth-of-type(2)", top: -18.5, text: "Second paragraph" },
+  });
+
+  // Ctrl+R: a fresh chrome page in the same tab, with only sessionStorage carried over.
+  const second = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html", storage: first.storage });
+  const restored = second.postedToFrame.filter((message) => message.type === "lavish:restoreScroll").at(-1);
+  assert.ok(restored, "the frame load replays a scroll position");
+  assert.equal(restored.x, 12);
+  assert.equal(restored.y, 2480);
+  // The message object was built inside the client's own realm; compare by value, not prototype.
+  assert.deepEqual(JSON.parse(JSON.stringify(restored.anchor)), {
+    selector: "section#s3 > p:nth-of-type(2)",
+    top: -18.5,
+    text: "Second paragraph",
+  });
 });

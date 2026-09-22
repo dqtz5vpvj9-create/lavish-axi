@@ -2597,6 +2597,7 @@ if(c)c.textContent="The Lavish editor script did not load. The server usually re
 if(a){a.textContent="Check and reload";a.disabled=false;a.onclick=check;}
 showBypass();
 if(o)o.hidden=false;
+if(o&&o.classList)o.classList.add("layout-gate-urgent");
 if(document.body)document.body.classList.add("layout-gate-active");
 armGate(${CHROME_LAYOUT_GATE_MAX_HOLD_MS});
 }

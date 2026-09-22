@@ -1289,7 +1289,9 @@ test("artifact SDK reports its scroll position and restores it on request", () =
 test("chrome remembers the artifact scroll position across reloads", async () => {
   const js = await chromeClientSource();
 
-  assert.match(js, /let lastScroll = \{ x: 0, y: 0 \}/);
+  // The position outlives the page: it is read back from tab storage at boot.
+  assert.match(js, /let lastScroll = loadStoredScroll\(\)/);
+  assert.match(js, /lavish-axi:scroll:/);
   assert.match(js, /msg\.type === ["']lavish:scroll["']/);
   assert.match(js, /type:\s*["']lavish:restoreScroll["']/);
   assert.match(js, /x:\s*lastScroll\.x,\s*y:\s*lastScroll\.y/);
