@@ -3300,9 +3300,9 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
     return false;
   };
   // Keep whatever is on screen, then try again later. A begin-load can fail for reasons that
-  // clear on their own - the shared server is mid-restart, or its handoff map was reset by that
-  // restart and this chrome's one re-handshake landed in the same outage window. Giving up here
-  // is what leaves the review permanently unloaded.
+  // clear on their own - the shared server is mid-restart, or a handoff no begin-load had yet
+  // persisted was lost with that restart and this chrome's one re-handshake landed in the same
+  // outage window. Giving up here is what leaves the review permanently unloaded.
   const recoverLater = () => {
     preservePreviousLoad();
     if (requestSequence !== artifactLoadRequestSequence || ended) return false;

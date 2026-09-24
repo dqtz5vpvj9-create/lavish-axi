@@ -124,6 +124,9 @@ test("a stale control-channel server is replaced only once per CLI invocation", 
             LAVISH_AXI_STATE_DIR: dir,
             LAVISH_AXI_NO_OPEN: "1",
             LAVISH_AXI_TELEMETRY: "0",
+            // The real server this spawns can take the port once the fake closes; let it idle out
+            // instead of outliving the test.
+            LAVISH_AXI_IDLE_TIMEOUT_MS: "1000",
           },
           async () => {
             try {
@@ -145,9 +148,11 @@ test("a stale control-channel server is replaced only once per CLI invocation", 
   });
 });
 
-test("a server that cannot bind a control-channel address closes every listener and fails", async () => {
+test("an occupied loopback control address prevents binding another listener", async () => {
   await withTempDir(async (dir) => {
-    const squatter = createServer();
+    // Drops each connection: startup probes an occupied loopback port for a Lavish owner, and a
+    // connection nobody reads would hold this server's close() open.
+    const squatter = createServer((socket) => socket.destroy());
     await new Promise((resolve) => squatter.listen({ port: 0, host: "127.0.0.1" }, () => resolve(undefined)));
     const occupiedPort = /** @type {{ port: number }} */ (squatter.address()).port;
     try {
@@ -163,7 +168,7 @@ test("a server that cannot bind a control-channel address closes every listener 
         }),
         (error) => {
           assert.ok(error instanceof Error);
-          assert.match(error.message, /control-channel address/);
+          assert.match(error.message, /Loopback .* already in use/);
           return true;
         },
       );
@@ -182,7 +187,9 @@ test("a server that cannot bind a control-channel address closes every listener 
 test("an occupied requested address does not report network_stale after loopback fallback", async () => {
   await withTempDir(async (dir) => {
     const occupiedHost = "::1";
-    const squatter = createServer();
+    // Drops each connection: startup probes an occupied loopback port for a Lavish owner, and a
+    // connection nobody reads would hold this server's close() open.
+    const squatter = createServer((socket) => socket.destroy());
     await new Promise((resolve, reject) => {
       squatter.once("error", reject);
       squatter.listen({ port: 0, host: occupiedHost }, () => resolve(undefined));
@@ -259,7 +266,9 @@ test("a bind that cannot succeed anywhere still fails loudly and names the cause
   await withTempDir(async (dir) => {
     // Occupy loopback so even the fallback has nowhere to go: the retry must terminate and the
     // failure must still surface, rather than the loop spinning or swallowing the reason.
-    const squatter = createServer();
+    // Drops each connection: startup probes an occupied loopback port for a Lavish owner, and a
+    // connection nobody reads would hold this server's close() open.
+    const squatter = createServer((socket) => socket.destroy());
     await new Promise((resolve) => squatter.listen({ port: 0, host: "127.0.0.1" }, () => resolve(undefined)));
     const occupiedPort = /** @type {{ port: number }} */ (squatter.address()).port;
     try {
@@ -275,9 +284,10 @@ test("a bind that cannot succeed anywhere still fails loudly and names the cause
         }),
         (error) => {
           assert.ok(error instanceof Error);
-          assert.match(error.message, /failed to bind any address/);
-          // The cause has to survive: "failed to bind" with no errno is undiagnosable in server.log.
-          assert.match(error.message, /EADDRINUSE/);
+          assert.match(error.message, /Loopback .* already in use/);
+          // The cause has to survive so a caller can diagnose the occupied port.
+          assert.ok(error.cause instanceof Error && "code" in error.cause);
+          assert.equal(error.cause.code, "EADDRINUSE");
           return true;
         },
       );
@@ -451,7 +461,9 @@ test("a clean detached-server shutdown exits 0 without an error in server.log", 
 
 test("a detached server crash writes a timestamped line to server.log", async () => {
   await withTempDir(async (dir) => {
-    const squatter = createServer();
+    // Drops each connection: startup probes an occupied loopback port for a Lavish owner, and a
+    // connection nobody reads would hold this server's close() open.
+    const squatter = createServer((socket) => socket.destroy());
     await new Promise((resolve) => squatter.listen({ port: 0, host: "127.0.0.1" }, () => resolve(undefined)));
     const occupiedPort = /** @type {{ port: number }} */ (squatter.address()).port;
     const logFile = path.join(dir, "server.log");
@@ -616,6 +628,7 @@ test("the control channel finds a fallen-back server on loopback", async () => {
         {
           LAVISH_AXI_PORT: String(server.port),
           LAVISH_AXI_HOST: UNBINDABLE_HOST,
+          LAVISH_AXI_STATE_DIR: dir,
         },
         () => stopCommand([]),
       );
@@ -649,6 +662,7 @@ test(
           {
             LAVISH_AXI_PORT: String(port),
             LAVISH_AXI_HOST: "::1",
+            LAVISH_AXI_STATE_DIR: dir,
           },
           () => stopCommand([]),
         );
@@ -677,6 +691,7 @@ test(
           {
             LAVISH_AXI_PORT: String(port),
             LAVISH_AXI_HOST: "::1",
+            LAVISH_AXI_STATE_DIR: dir,
           },
           () => stopCommand([]),
         );

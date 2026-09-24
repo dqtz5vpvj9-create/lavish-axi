@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.78](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.77...lavish-axi-v0.1.78) (2026-09-23)
+
+
+### Bug Fixes
+
+* keep one review server reachable across network changes ([#374](https://github.com/kunchenguid/lavish-axi/issues/374)) ([edc0607](https://github.com/kunchenguid/lavish-axi/commit/edc06076d8dc2550b25e35e6b1928ff8004b9b83))
+* **server:** keep the reviewer's artifact load across a server restart ([#371](https://github.com/kunchenguid/lavish-axi/issues/371)) ([87d6ae9](https://github.com/kunchenguid/lavish-axi/commit/87d6ae9bf975cf4531c64926cbb58993f5327328)), closes [#369](https://github.com/kunchenguid/lavish-axi/issues/369)
+
+## [0.1.77](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.76...lavish-axi-v0.1.77) (2026-09-22)
+
+
+### Bug Fixes
+
+* clarify HTML file output in the Lavish skill ([#344](https://github.com/kunchenguid/lavish-axi/issues/344)) ([a3b3987](https://github.com/kunchenguid/lavish-axi/commit/a3b3987062bb77441bbe6bd0cf40cc431f18888e))
+
 ## [0.1.76](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.75...lavish-axi-v0.1.76) (2026-09-21)
 
 

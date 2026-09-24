@@ -361,6 +361,196 @@ test("reopening a session preserves the live reviewer handoff and artifact load"
   }
 });
 
+test("a replacement server preserves the live reviewer handoff and artifact load", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const handoff = await store.issueReviewerHandoff(session.key);
+    const load = await store.beginArtifactLoad(session.key, {
+      requestId: "live-load",
+      requestSequence: 1,
+      handoffToken: handoff.chrome_load_token,
+    });
+
+    // An upgrade restart hands the reviewer's already-open tab a store that has only state.json
+    // to go on. The tab did not ask for the restart and its load is still the current one.
+    const restarted = new SessionStore(stateFile);
+    const verified = await restarted.verifyArtifactLoad(session.key, load.artifact_load_token, load.artifact_revision);
+    assert.equal(verified.valid, true);
+    assert.equal(verified.artifact_load_token, load.artifact_load_token);
+
+    // A chrome rendering against a replacement server is handed the surviving load rather than a
+    // blank one, so it has something to keep on screen. (Its own store: issuing a handoff is what
+    // supersedes the reviewer below, and a render is not what this test is about.)
+    const rendered = await new SessionStore(stateFile).issueReviewerHandoff(session.key);
+    assert.equal(rendered.artifact_load_token, load.artifact_load_token);
+    assert.equal(rendered.artifact_load_sequence, 1);
+
+    // The tab that owned the review still owns it, so its next begin is not a re-handshake.
+    const resumed = await restarted.beginArtifactLoad(session.key, {
+      requestId: "resumed-load",
+      requestSequence: 2,
+      handoffToken: handoff.chrome_load_token,
+    });
+    assert.equal(resumed.stale, undefined);
+    assert.equal(resumed.artifact_revision, load.artifact_revision + 1);
+
+    // Only the restart stopped invalidating the old token; a newer begun load still does.
+    const fenced = await restarted.verifyArtifactLoad(session.key, load.artifact_load_token, load.artifact_revision);
+    assert.equal(fenced.valid, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a replacement server restores the begin fences the previous one issued", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<h1>Hello</h1>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const handoff = await store.issueReviewerHandoff(session.key);
+    const load = await store.beginArtifactLoad(session.key, {
+      requestId: "live-load",
+      requestSequence: 4,
+      handoffToken: handoff.chrome_load_token,
+    });
+
+    const restarted = new SessionStore(stateFile);
+    // A retry of the request that established the load is still that load, not a new epoch.
+    const retry = await restarted.beginArtifactLoad(session.key, {
+      requestId: "live-load",
+      requestSequence: 4,
+      handoffToken: handoff.chrome_load_token,
+    });
+    assert.equal(retry.artifact_load_token, load.artifact_load_token);
+    assert.equal(retry.artifact_revision, load.artifact_revision);
+    // ...and a request the previous server already overtook stays overtaken.
+    const outOfOrder = await restarted.beginArtifactLoad(session.key, {
+      requestId: "delayed-load",
+      requestSequence: 3,
+      handoffToken: handoff.chrome_load_token,
+    });
+    assert.equal(outOfOrder.stale, "out-of-order");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a partially stored artifact load is no load at all", async () => {
+  // Every field of the epoch is a fence some later begin is judged against, so a record missing
+  // one cannot be honored in part: restoring the token while defaulting `handoff_token` away
+  // would leave a load that answers 200 and an owner whose next begin is told `no-handoff`.
+  const fields = [
+    "artifact_load_token",
+    "artifact_revision",
+    "last_pass_sequence",
+    "request_id",
+    "request_sequence",
+    "handoff_token",
+  ];
+  for (const missing of fields) {
+    const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+    try {
+      const stateFile = path.join(dir, "state.json");
+      const artifact = path.join(dir, "artifact.html");
+      await writeFile(artifact, "<h1>Hello</h1>");
+
+      const store = new SessionStore(stateFile);
+      const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+      const handoff = await store.issueReviewerHandoff(session.key);
+      const load = await store.beginArtifactLoad(session.key, {
+        requestId: "live-load",
+        requestSequence: 1,
+        handoffToken: handoff.chrome_load_token,
+      });
+
+      const state = JSON.parse(await readFile(stateFile, "utf8"));
+      assert.ok(Object.hasOwn(state.sessions[session.key].artifact_load, missing), missing);
+      delete state.sessions[session.key].artifact_load[missing];
+      await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`);
+
+      const restarted = new SessionStore(stateFile);
+      const verified = await restarted.verifyArtifactLoad(
+        session.key,
+        load.artifact_load_token,
+        load.artifact_revision,
+      );
+      assert.equal(verified.valid, false, `missing ${missing} was honored`);
+      assert.equal(verified.artifact_load_token, "", `missing ${missing} was reported as current`);
+
+      // ...and the review is still recoverable: a fresh handshake begins a new epoch that loads.
+      const freshHandoff = await restarted.issueReviewerHandoff(session.key);
+      const fresh = await restarted.beginArtifactLoad(session.key, {
+        requestId: "fresh-load",
+        requestSequence: freshHandoff.artifact_load_sequence + 1,
+        handoffToken: freshHandoff.chrome_load_token,
+      });
+      assert.equal(fresh.stale, undefined, `missing ${missing} blocked recovery`);
+      assert.equal(fresh.artifact_revision, load.artifact_revision + 1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a stored artifact load with a malformed fence is no load at all", async () => {
+  const corruptions = [
+    { last_pass_sequence: "soon" },
+    { request_sequence: -1 },
+    { request_id: 7 },
+    { artifact_revision: "one" },
+    { artifact_revision: null },
+    { artifact_revision: true },
+    { artifact_revision: "1" },
+    { artifact_revision: 1.5 },
+    { artifact_revision: 0 },
+    { artifact_revision: -1 },
+    { handoff_token: "" },
+    { artifact_load_token: "" },
+  ];
+  for (const corruption of corruptions) {
+    const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+    try {
+      const stateFile = path.join(dir, "state.json");
+      const artifact = path.join(dir, "artifact.html");
+      await writeFile(artifact, "<h1>Hello</h1>");
+
+      const store = new SessionStore(stateFile);
+      const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+      const handoff = await store.issueReviewerHandoff(session.key);
+      const load = await store.beginArtifactLoad(session.key, {
+        requestId: "live-load",
+        requestSequence: 1,
+        handoffToken: handoff.chrome_load_token,
+      });
+
+      const state = JSON.parse(await readFile(stateFile, "utf8"));
+      Object.assign(state.sessions[session.key].artifact_load, corruption);
+      await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`);
+
+      const restarted = new SessionStore(stateFile);
+      const verified = await restarted.verifyArtifactLoad(
+        session.key,
+        load.artifact_load_token,
+        load.artifact_revision,
+      );
+      assert.equal(verified.valid, false, `${JSON.stringify(corruption)} was honored`);
+      assert.equal(verified.artifact_load_token, "", `${JSON.stringify(corruption)} was reported as current`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("typed handoff outcomes separate superseded and no-handoff begins", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
   try {
